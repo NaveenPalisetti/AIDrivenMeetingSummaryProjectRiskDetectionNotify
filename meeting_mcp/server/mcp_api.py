@@ -29,10 +29,20 @@ except Exception:
 
 
 def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    """Simple API key verification dependency. Set MCP_API_KEY env var to enable."""
+    """Simple API key verification dependency.
+
+    For local development you can bypass the check by setting the environment
+    variable `DISABLE_API_KEY_CHECK=1`. When bypass is disabled behavior is
+    unchanged: if `MCP_API_KEY` is not set the API allows requests; otherwise
+    requests must provide `x-api-key` header equal to `MCP_API_KEY`.
+    """
+    # Explicit bypass for local development/testing
+    if os.environ.get("DISABLE_API_KEY_CHECK") == "1":
+        return True
+
     expected = os.environ.get("MCP_API_KEY")
     if expected is None:
-        # No API key configured — allow local/dev usage but log a warning
+        # No API key configured — allow local/dev usage
         return True
     if not x_api_key or x_api_key != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
