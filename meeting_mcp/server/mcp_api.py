@@ -1,7 +1,7 @@
 from typing import Any, Optional, List, Dict
 import os
 
-from fastapi import FastAPI, Depends, Header, HTTPException, status
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from meeting_mcp.core.mcp import MCPHost
@@ -28,25 +28,9 @@ except Exception:
 # Note: CORS middleware removed per request (if needed, re-add carefully)
 
 
-def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    """Simple API key verification dependency.
-
-    For local development you can bypass the check by setting the environment
-    variable `DISABLE_API_KEY_CHECK=1`. When bypass is disabled behavior is
-    unchanged: if `MCP_API_KEY` is not set the API allows requests; otherwise
-    requests must provide `x-api-key` header equal to `MCP_API_KEY`.
-    """
-    # Explicit bypass for local development/testing
-    if os.environ.get("DISABLE_API_KEY_CHECK") == "1":
-        return True
-
-    expected = os.environ.get("MCP_API_KEY")
-    if expected is None:
-        # No API key configured — allow local/dev usage
-        return True
-    if not x_api_key or x_api_key != expected:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
-    return True
+# API key verification removed for local/dev convenience. If you need
+# authentication, reintroduce a dependency or middleware that validates
+# `x-api-key` against `MCP_API_KEY` or use a production-ready auth layer.
 
 # Create an in-process MCP host and register the Calendar tool
 mcp_host = MCPHost()
@@ -81,7 +65,7 @@ class TranscriptRequest(BaseModel):
     data: Optional[Any] = None
 
 
-@app.post("/mcp/calendar", dependencies=[Depends(verify_api_key)])
+@app.post("/mcp/calendar")
 async def call_calendar(req: CalendarRequest):
     # create a short-lived session for this HTTP call
     session_id = mcp_host.create_session(agent_id="http-client")
@@ -91,7 +75,7 @@ async def call_calendar(req: CalendarRequest):
     return result
 
 
-@app.post("/mcp/transcript", dependencies=[Depends(verify_api_key)])
+@app.post("/mcp/transcript")
 async def call_transcript(req: TranscriptRequest):
     session_id = mcp_host.create_session(agent_id="http-client")
     params = req.dict(exclude_none=True)
@@ -126,14 +110,14 @@ class RiskRequest(BaseModel):
     progress: Optional[Dict[str, Any]] = None
 
 
-@app.post("/mcp/orchestrate", dependencies=[Depends(verify_api_key)])
+@app.post("/mcp/orchestrate")
 async def call_orchestrate(req: OrchestrateRequest):
     # delegate to the orchestrator agent which will create its own session and invoke tools
     result = await orchestrator.orchestrate(req.message, req.params or {})
     return result
 
 
-@app.post("/mcp/summarize", dependencies=[Depends(verify_api_key)])
+@app.post("/mcp/summarize")
 async def call_summarize(req: SummarizeRequest):
     session_id = mcp_host.create_session(agent_id="http-client")
     params = req.dict(exclude_none=True)
@@ -145,7 +129,7 @@ async def call_summarize(req: SummarizeRequest):
     return result
 
 
-@app.post("/mcp/jira", dependencies=[Depends(verify_api_key)])
+@app.post("/mcp/jira")
 async def call_jira(req: JiraRequest):
     session_id = mcp_host.create_session(agent_id="http-client")
     params = req.dict(exclude_none=True)
@@ -157,7 +141,7 @@ async def call_jira(req: JiraRequest):
     return result
 
 
-@app.post("/mcp/risk", dependencies=[Depends(verify_api_key)])
+@app.post("/mcp/risk")
 async def call_risk(req: RiskRequest):
     session_id = mcp_host.create_session(agent_id="http-client")
     params = req.dict(exclude_none=True)
