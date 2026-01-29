@@ -8,6 +8,7 @@ import re
 from typing import List, Dict
 import logging
 import sys
+from datetime import date, timedelta
 
 logger = logging.getLogger("meeting_mcp.nlp_task_extraction")
 
@@ -24,34 +25,97 @@ def _split_sentences(text: str) -> List[str]:
 
 
 def _find_owner(sentence: str):
-    # Look for patterns like 'Alice (PO)', 'assign to Alice', 'Alice will', 'owner: Alice'
-    m = re.search(r"owner:\s*([A-Z][a-zA-Z\-]+)", sentence, flags=re.I)
-    if m:
-        return m.group(1)
-    m = re.search(r"assign(?:ed)?(?: to)?\s+([A-Z][a-zA-Z\-]+)", sentence, flags=re.I)
-    if m:
-        return m.group(1)
-    m = re.search(r"([A-Z][a-zA-Z\-]+)\s*\(", sentence)
-    if m:
-        return m.group(1)
-    m = re.search(r"([A-Z][a-zA-Z\-]+)\s+(will|shall|should|can|must)\b", sentence)
-    if m:
-        return m.group(1)
-    # Match patterns like 'sarah to review' or 'David, to review' (common shorthand)
-    m = re.search(r"([A-Za-z][a-zA-Z\-]+)\s*(?:,)?\s+to\s+\w+", sentence, flags=re.I)
-    if m:
-        return m.group(1)
+    # Improve owner extraction with candidate validation and common patterns.
+    OWNER_BLACKLIST = {"needs", "need", "requires", "require", "should", "could", "would", "will", "must", "may", "maybe", "the", "a", "an", "this", "that", "to", "be", "based", "user", "users", "team", "client", "clients", "workflow", "we", "us"}
+
+    def _valid(g: str) -> bool:
+        if not g:
+            return False
+        g_clean = g.strip()
+        if len(g_clean) <= 1:
+            return False
+        if g_clean.lower() in OWNER_BLACKLIST:
+            return False
+        # avoid matching common verbs
+        if re.match(r"^(needs?|requires?|should|could|would|will|must)$", g_clean.lower()):
+            return False
+        return True
+
+    # Pattern: explicit 'owner: Name' or 'assign to Name'
+    m = re.search(r"owner:\s*([A-Za-z][a-zA-Z\-]+(?:\s+[A-Za-z][a-zA-Z\-]+)?)", sentence, flags=re.I)
+    if m and _valid(m.group(1)):
+        return m.group(1).strip()
+    m = re.search(r"assign(?:ed)?(?: to)?\s+([A-Za-z][a-zA-Z\-]+(?:\s+[A-Za-z][a-zA-Z\-]+)?)", sentence, flags=re.I)
+    if m and _valid(m.group(1)):
+        return m.group(1).strip()
+
+    # Pattern: 'David, ...' or 'David Ba, ...' (speaker-addressed)
+    m = re.search(r"^\s*([A-Za-z][a-zA-Z\-]+(?:\s+[A-Za-z][a-zA-Z\-]+)?)\s*,\s+", sentence)
+    if m and _valid(m.group(1)):
+        return m.group(1).strip()
+
+    # Pattern: 'Name (Role):' e.g., 'Bob (QA):'
+    m = re.search(r"([A-Za-z][a-zA-Z\-]+(?:\s+[A-Za-z][a-zA-Z\-]+)?)\s*\(", sentence)
+    if m and _valid(m.group(1)):
+        return m.group(1).strip()
+
+    # Pattern: 'Name will/shall/should ...'
+    m = re.search(r"([A-Za-z][a-zA-Z\-]+)\s+(will|shall|should|can|must)\b", sentence)
+    if m and _valid(m.group(1)):
+        return m.group(1).strip()
+
+    # Shorthand: 'Sarah to review' or 'David to check' (common)
+    m = re.search(r"\b([A-Za-z][a-zA-Z\-]+)\s*(?:,)?\s+to\s+\w+", sentence, flags=re.I)
+    if m and _valid(m.group(1)):
+        return m.group(1).strip()
+
     return None
 
 
 def _find_due(sentence: str):
-    # Very small set of due-date patterns: 'by <date>', 'by Friday', 'due <date>'
+    # Try explicit absolute date patterns first
     m = re.search(r"by\s+([A-Z][a-z]+\b|\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})", sentence, flags=re.I)
     if m:
         return m.group(1)
     m = re.search(r"due\s+(on\s+)?([A-Z][a-z]+\b|\d{1,2}/\d{1,2}/\d{2,4})", sentence, flags=re.I)
     if m:
         return m.group(2)
+
+    # Relative due patterns: 'in 2 days', 'within 3 days', 'tomorrow', 'today', 'next week'
+    m = re.search(r"in\s+(\d+)\s+days?", sentence, flags=re.I)
+    if m:
+        try:
+            d = date.today() + timedelta(days=int(m.group(1)))
+            return d.isoformat()
+        except Exception:
+            pass
+    m = re.search(r"within\s+(\d+)\s+days?", sentence, flags=re.I)
+    if m:
+        try:
+            d = date.today() + timedelta(days=int(m.group(1)))
+            return d.isoformat()
+        except Exception:
+            pass
+    m = re.search(r"(\d+)\s+days?\s+from\s+now", sentence, flags=re.I)
+    if m:
+        try:
+            d = date.today() + timedelta(days=int(m.group(1)))
+            return d.isoformat()
+        except Exception:
+            pass
+    m = re.search(r"tomorrow\b", sentence, flags=re.I)
+    if m:
+        return (date.today() + timedelta(days=1)).isoformat()
+    m = re.search(r"today\b", sentence, flags=re.I)
+    if m:
+        return date.today().isoformat()
+    m = re.search(r"end\s+of\s+week|end\s+of\s+this\s+week|by\s+end\s+of\s+week", sentence, flags=re.I)
+    if m:
+        today = date.today()
+        days_until_sunday = (6 - today.weekday()) if today.weekday() < 6 else 0
+        return (today + timedelta(days=days_until_sunday)).isoformat()
+
+    # fallback: none
     return None
 
 
@@ -122,7 +186,7 @@ def _score_action_sentence(sentence: str) -> float:
     return score
 
 
-def extract_tasks_structured(text: str, max_tasks: int = 10, min_confidence: float = 0.4) -> List[Dict]:
+def extract_tasks_structured(text: str, max_tasks: int = 5, min_confidence: float = 0.3) -> List[Dict]:
     """Extract up to `max_tasks` structured tasks from `text`.
 
     Returns list of dicts: {"title": str, "owner": Optional[str], "due": Optional[str], "raw": str}

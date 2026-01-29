@@ -1,3 +1,6 @@
+
+from ..protocols.a2a import AgentCard, AgentCapability, A2AMessage, PartType
+
 import os
 import json
 import uuid
@@ -10,6 +13,58 @@ except Exception:
 
 
 class RiskDetectionAgent:
+    # A2A protocol support
+    AGENT_CARD = AgentCard(
+        agent_id="risk_detection_agent",
+        name="RiskDetectionAgent",
+        description="Detects risks from meeting summaries, tasks, and Jira via A2A protocol.",
+        version="1.0",
+        capabilities=[
+            AgentCapability(
+                name="detect_risk",
+                description="Detect risks from meeting summary, tasks, and Jira."
+            ),
+        ],
+    )
+
+    @staticmethod
+    def handle_detect_risk_message(msg: A2AMessage) -> A2AMessage:
+        """Handle A2A detect_risk messages."""
+        # Extract meeting_id, summary, tasks, progress from message parts
+        meeting_id = None
+        summary = None
+        tasks = []
+        progress = None
+        for part in msg.parts:
+            ptype = part.get("type")
+            if ptype in (PartType.MEETING_ID, "meeting_id"):
+                meeting_id = part.get("content")
+            elif ptype in (PartType.SUMMARY, "summary"):
+                summary = part.get("content")
+            elif ptype in (PartType.TASK, PartType.ACTION_ITEM, "task", "action_item"):
+                tasks.append(part.get("content"))
+            elif ptype in (PartType.PROGRESS, "progress"):
+                progress = part.get("content")
+        # Fallbacks
+        if not meeting_id:
+            meeting_id = "unknown"
+        if summary is None:
+            summary = ""
+        if progress is None:
+            progress = {}
+        # Call the agent's detect method
+        agent = RiskDetectionAgent()
+        risks = agent.detect(meeting_id, summary, tasks, progress)
+        return A2AMessage(
+            sender=RiskDetectionAgent.AGENT_CARD.name,
+            recipient=msg.sender,
+            parts=[
+                {
+                    "type": PartType.RESULT,
+                    "content": {"risks": risks}
+                }
+            ]
+        )
     """Detect simple risks from meeting summary, tasks, and optionally Jira.
 
     Methods
@@ -17,7 +72,7 @@ class RiskDetectionAgent:
     - detect_jira_risks: query Jira for overdue, unassigned, blocked, stale, and high-priority issues
     """
 
-    def __init__(self):
+    def __init__(self, mcp_host: object = None):
         # Initialize Jira client if credentials found
         self.jira = None
         self.jira_project = os.environ.get("JIRA_PROJECT")
@@ -45,6 +100,14 @@ class RiskDetectionAgent:
                 self.jira = JIRA(server=jira_url, basic_auth=(jira_user, jira_token))
             except Exception:
                 self.jira = None
+        # MCP session handling
+        self.mcp_host = mcp_host
+        self.mcp_session_id = None
+        if mcp_host is not None:
+            try:
+                self.mcp_session_id = mcp_host.create_session(self.AGENT_CARD.agent_id)
+            except Exception:
+                self.mcp_session_id = None
 
     def _gen_id(self, prefix: str = "risk") -> str:
         return f"{prefix}_{uuid.uuid4().hex[:8]}"

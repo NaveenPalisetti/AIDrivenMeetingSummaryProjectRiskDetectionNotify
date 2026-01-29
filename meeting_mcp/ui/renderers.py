@@ -107,12 +107,46 @@ def render_processed_chunks(processed, title, add_message, debug: dict | None = 
                 st.json(debug)
             except Exception:
                 st.write(debug)
+    
+def render_jira_result(jira_result, title=None, add_message=None):
+        """Render Jira creation results in a rich, user-friendly format."""
+        import pandas as pd
+        st.header(f"Jira Creation Result{f' — {title}' if title else ''}")
+        # Persist a short assistant message to history
+        if add_message:
+            try:
+                results = jira_result.get('results', {}) if isinstance(jira_result, dict) else jira_result
+                add_message('assistant', f"Jira creation result: {results}")
+            except Exception:
+                pass
+        # Extract created tasks/issues
+        results = jira_result.get('results', {}) if isinstance(jira_result, dict) else jira_result
+        tasks = results.get('tasks') or results.get('created') or results.get('task') or results.get('issue')
+        if tasks:
+            if isinstance(tasks, dict):
+                tasks = [tasks]
+            if isinstance(tasks, list):
+                st.markdown("**Created Jira Tasks:**")
+                # Flatten dicts for display
+                def flatten(d):
+                    return {k: (v if not isinstance(v, dict) else str(v)) for k, v in d.items()}
+                df = pd.DataFrame([flatten(t) for t in tasks])
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.markdown(f"**Created Jira Task:** {tasks}")
+        else:
+            st.info("No Jira tasks were created or returned by the backend.")
+        # Always show raw JSON for traceability
+        with st.expander("Raw Jira result JSON", expanded=False):
+            st.markdown(f"```json\n{json.dumps(jira_result, indent=2)}\n```")
 
-
+    
 def render_summary_result(summary_obj, title, add_message, orchestrator=None):
     """Render a structured summary result (summary text/list and action items).
     Accepts either a string summary or a dict with keys `summary` and `action_items`.
     """
+    # Debug: log what is being passed to render_summary_result
+    logger.debug(f"[render_summary_result] summary_obj for '{title}': {json.dumps(summary_obj, default=str)[:1000]}")
     # Persist the summary to chat history
     try:
         summary_text = ""
@@ -125,13 +159,16 @@ def render_summary_result(summary_obj, title, add_message, orchestrator=None):
                 summary_text = str(summary_val or "")
             action_items = summary_obj.get('action_items') or []
         else:
-            summary_text = str(summary_obj)
-        if summary_text:
-            add_message("assistant", f"Summary for {title}:\n\n{summary_text}")
-    except Exception:
-        pass
+            summary_text = str(summary_obj)        
+    except Exception as e:
+        logger.exception(f"[render_summary_result] Exception in summary chat persist: {e}")
 
     st.header(f"Summary — {title}")
+    # create a safe_title for unique widget keys (avoid collisions across reruns/pages)
+    try:
+        safe_title = str(title).replace(' ', '_').replace('/', '_')
+    except Exception:
+        safe_title = 'summary'
     if isinstance(summary_obj, dict) and summary_obj.get('summary'):
         s = summary_obj.get('summary')
         if isinstance(s, list):
@@ -143,13 +180,14 @@ def render_summary_result(summary_obj, title, add_message, orchestrator=None):
         st.markdown(str(summary_obj))
 
     if isinstance(summary_obj, dict) and summary_obj.get('action_items'):
+        logger.debug(f"[render_summary_result] Rendering action items table for '{title}' with {len(summary_obj.get('action_items', []))} items.")
         st.subheader("Action Items")
         ais = summary_obj.get('action_items')
         # persist last action items for chat commands (e.g., 'create jira: <task>')
         try:
             st.session_state['last_action_items'] = ais
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[render_summary_result] Exception persisting last_action_items: {e}")
 
         # Build table rows ensuring required fields: summary, assignee, issue_type, due_date
         rows = []
@@ -180,8 +218,33 @@ def render_summary_result(summary_obj, title, add_message, orchestrator=None):
         except Exception:
             # Fallback to simple table if pandas not available
             st.table(rows)
-
-        # For each item, provide an expander with full details and quick actions
+        logger.debug(f"[render_summary_result] Action items table rendered for '{title}'.")
+        if summary_text:
+            try:
+                md = f"Summary for {title}:\n\n{summary_text}"
+                # If we have action items, include a compact markdown table in the assistant message
+                if ais:
+                    table_lines = ["| Summary | Assignee | Issue Type | Due Date |", "|---|---|---|---|"]
+                    def _esc(s):
+                        return str(s or "").replace("|", "\\|")
+                    for ai in ais:
+                        if isinstance(ai, dict):
+                            summary_field = ai.get('summary') or ai.get('task') or ai.get('title') or str(ai)
+                            assignee = ai.get('assignee') or ai.get('owner') or ai.get('assigned_to') or "Unassigned"
+                            issue_type = ai.get('issue_type') or ai.get('type') or ai.get('ticket_type') or ai.get('issueType') or ""
+                            due_date = ai.get('due') or ai.get('due_date') or ai.get('deadline') or ""
+                        else:
+                            summary_field = str(ai)
+                            assignee = "Unassigned"
+                            issue_type = ""
+                            due_date = ""
+                        table_lines.append(f"| {_esc(summary_field)} | {_esc(assignee)} | {_esc(issue_type)} | {_esc(due_date)} |")
+                    md += "\n\nAction Items:\n\n" + "\n".join(table_lines)
+                add_message("assistant", md)
+            except Exception:
+                # fallback to previous behaviour
+                add_message("assistant", f"Summary for {title}:\n\n{summary_text}")
+        # For each item, provide an expander with full details and only the Create Jira button
         for idx, ai in enumerate(ais):
             item_title = (ai.get('summary') or ai.get('task') or ai.get('title')) if isinstance(ai, dict) else str(ai)
             with st.expander(f"Details — {item_title[:80]}", expanded=False):
@@ -196,44 +259,83 @@ def render_summary_result(summary_obj, title, add_message, orchestrator=None):
                 else:
                     st.write(ai)
 
-                cols = st.columns([1,1,1])
-                with cols[0]:
-                    if st.button(f"Assign", key=f"assign_{idx}"):
-                        st.info("Assign clicked — implement assignment flow.")
-                with cols[1]:
-                    if st.button(f"Edit", key=f"edit_{idx}"):
-                        st.info("Edit clicked — implement inline edit flow.")
-                with cols[2]:
-                    if st.button(f"Create Jira", key=f"jira_{idx}"):
-                        # Build params consistent with streamlit_agent_client chat flow
+                # Only show the Create Jira button
+                jira_key = f"jira_{safe_title}_{idx}"
+                logger.debug(f"Rendering Create Jira button with key={jira_key}")
+                if st.button("Create Jira", key=jira_key):
+                    logger.debug(f"Create Jira button clicked with key={jira_key}")
+                    # determine task/owner/due first so we can show immediate feedback
+                    if isinstance(ai, dict):
                         task = ai.get('summary') or ai.get('task') or ai.get('title') or ''
                         owner = ai.get('assignee') or ai.get('owner') or ai.get('assigned_to') or None
                         due = ai.get('due') or ai.get('deadline') or ai.get('due_date') or None
-                        add_message('user', f"Create Jira: {task}")
-                        with st.chat_message('user'):
-                            st.markdown(f"Create Jira: {task}")
+                    else:
+                        task = str(ai)
+                        owner = None
+                        due = None
 
-                        params = {"task": task, "owner": owner, "deadline": due}
-                        if orchestrator is None:
-                            st.info("Orchestrator not available — cannot create Jira.")
-                        else:
+                    logger.info("Create Jira button clicked for action item %d (key=%s)", idx, jira_key)
+                    st.info(f"Creating Jira for: {task}")
+
+                    add_message('user', f"Create Jira: {task}")
+                    with st.chat_message('user'):
+                        st.markdown(f"Create Jira: {task}")
+
+                    params = {"task": task, "owner": owner, "deadline": due}
+                    if orchestrator is None:
+                        st.info("Orchestrator not available — cannot create Jira.")
+                        st.session_state['last_jira_result'] = (False, "Orchestrator not available — cannot create Jira.")
+                    else:
+                        try:
+                            logger.info("Create Jira clicked: task=%s owner=%s due=%s", task, owner, due)
+                            jira_result = asyncio.run(orchestrator.orchestrate(f"create jira for {task}", params))
+                            logger.info("Jira result received: %s", str(jira_result)[:1000])
+                            st.session_state['last_jira_result'] = (True, jira_result)
+                            render_jira_result(jira_result, title=task, add_message=add_message)
+                        except Exception as e:
+                            logger.exception("Error creating Jira: %s", e)
+                            st.session_state['last_jira_result'] = (False, f"Error creating Jira: {e}")
                             try:
-                                logger.debug("Create Jira clicked: task=%s owner=%s due=%s", task, owner, due)
-                                jira_result = asyncio.run(orchestrator.orchestrate(f"create jira for {task}", params))
-                                logger.debug("Jira result received: %s", str(jira_result)[:1000])
-                                st.markdown(f"Jira creation result:\n\n```json\n{json.dumps(jira_result, indent=2)}\n```")
-                                try:
-                                    # Persist assistant history for created Jira
-                                    add_message('assistant', f"Jira creation result: {jira_result.get('results', {})}")
-                                except Exception:
-                                    pass
-                            except Exception as e:
-                                logger.exception("Error creating Jira: %s", e)
-                                st.markdown(f"Error creating Jira: {e}")
-                                try:
-                                    add_message('system', f"Error creating Jira: {e}")
-                                except Exception:
-                                    pass
+                                add_message('system', f"Error creating Jira: {e}")
+                            except Exception:
+                                pass
+
+        # Show Jira creation result below the table if available
+        if 'last_jira_result' in st.session_state:
+            success, result = st.session_state['last_jira_result']
+            if success:
+                st.success("Jira ticket created successfully!")
+                # Try to extract created tasks from the result
+                created = []
+                # Traverse possible nesting to find created_tasks
+                try:
+                    if isinstance(result, dict):
+                        created = (
+                            result.get('results', {}).get('jira', {}).get('results', {}).get('created_tasks')
+                            or result.get('created_tasks')
+                            or []
+                        )
+                except Exception:
+                    created = []
+                if created:
+                    st.markdown("**Created Jira Tasks:**")
+                    for idx, task in enumerate(created):
+                        if isinstance(task, dict):
+                            st.markdown(f"- **Summary:** {task.get('summary') or task.get('title') or task.get('task') or ''}")
+                            st.markdown(f"  - **Key:** {task.get('key') or task.get('id') or ''}")
+                            st.markdown(f"  - **Status:** {task.get('status') or ''}")
+                            st.markdown(f"  - **Assignee:** {task.get('assignee') or ''}")
+                            st.markdown(f"  - **Issue Type:** {task.get('issue_type') or ''}")
+                            st.markdown(f"  - **URL:** {task.get('url') or ''}")
+                        else:
+                            st.markdown(f"- {task}")
+                else:
+                    st.info("No Jira tasks were created or returned by the backend.")
+                with st.expander("Full Jira creation result JSON"):
+                    st.markdown(f"```json\n{json.dumps(result, indent=2)}\n```")
+            else:
+                st.error(result)
+    logger.debug(f"[render_summary_result] Completed rendering summary for '{title}'.")
 
 
 def render_calendar_result(calendar_block, orchestrator, add_message):
@@ -355,8 +457,9 @@ def render_calendar_result(calendar_block, orchestrator, add_message):
                                 params = {"processed_transcripts": processed or [], "mode": mode_param}
                                 sum_result = asyncio.run(orchestrator.orchestrate(f"summarize meeting {meeting_title}", params))
                                 sum_block = sum_result.get('results', {}).get('summarization') or sum_result.get('results')
+                                # Always pass the full summary dict to render_summary_result
                                 if isinstance(sum_block, dict) and sum_block.get('status') == 'success':
-                                    summary_obj = sum_block.get('summary')
+                                    summary_obj = sum_block.get('summary') if not sum_block.get('action_items') else sum_block
                                 else:
                                     summary_obj = sum_block
 
@@ -365,7 +468,7 @@ def render_calendar_result(calendar_block, orchestrator, add_message):
                                     try:
                                         render_summary_result(summary_obj, meeting_title, add_message, orchestrator)
                                     except Exception:
-                                            st.write(summary_obj)
+                                        st.write(summary_obj)
                                     try:
                                         st.session_state['suppress_calendar_render'] = True
                                     except Exception:

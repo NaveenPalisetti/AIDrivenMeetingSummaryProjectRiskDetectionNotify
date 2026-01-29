@@ -3,6 +3,7 @@ from typing import Dict, Any
 
 from meeting_mcp.core.mcp import MCPTool, MCPToolType
 from meeting_mcp.agents.risk_detection_agent import RiskDetectionAgent
+from meeting_mcp.protocols.a2a import A2AMessage, PartType
 
 
 class RiskTool(MCPTool):
@@ -27,25 +28,36 @@ class RiskTool(MCPTool):
 
         loop = asyncio.get_running_loop()
         try:
-            # Run summary-based detection in executor to avoid blocking
-            summary_risks = await loop.run_in_executor(None, self._agent.detect, meeting_id, summary, tasks, progress)
+            # Build A2A message for risk detection
+            parts = [
+                {"type": PartType.MEETING_ID, "content": meeting_id},
+                {"type": PartType.SUMMARY, "content": summary},
+            ]
+            for t in tasks:
+                parts.append({"type": PartType.TASK, "content": t})
+            if progress:
+                parts.append({"type": PartType.PROGRESS, "content": progress})
+            msg = A2AMessage(
+                sender="RiskTool",
+                recipient=RiskDetectionAgent.AGENT_CARD.name,
+                parts=parts
+            )
+            # Call the agent handler in a thread pool
+            result_msg = await loop.run_in_executor(None, RiskDetectionAgent.handle_detect_risk_message, msg)
+            risks = result_msg.parts[0]["content"].get("risks") if result_msg.parts else []
 
-            # Determine whether to include Jira-based risks. If param is not provided,
-            # default to including Jira results when a Jira client is configured.
+            # Optionally, still include Jira-based risks if requested
             include_jira_param = params.get("include_jira", None)
             include_jira = include_jira_param if include_jira_param is not None else bool(self._agent.jira)
-
             jira_risks = []
             if include_jira and self._agent.jira:
-                # detect_jira_risks is safe to call without args (uses defaults)
                 jira_risks = await loop.run_in_executor(None, self._agent.detect_jira_risks)
-
-            merged = (summary_risks or []) + (jira_risks or [])
+                risks = (risks or []) + (jira_risks or [])
 
             return {
                 "status": "success",
-                "risks": merged,
-                "summary_risks": summary_risks,
+                "risks": risks,
+                "summary_risks": risks,
                 "jira_risks": jira_risks,
             }
         except Exception as e:

@@ -64,7 +64,7 @@ class TranscriptRequest(BaseModel):
     # keep compatibility with orchestrator params
     data: Optional[Any] = None
 
-
+""" 
 @app.post("/mcp/calendar")
 async def call_calendar(req: CalendarRequest):
     # create a short-lived session for this HTTP call
@@ -72,7 +72,7 @@ async def call_calendar(req: CalendarRequest):
     params = req.dict(exclude_none=True)
     result = await mcp_host.execute_tool(session_id, "calendar", params)
     mcp_host.end_session(session_id)
-    return result
+    return result """
 
 
 @app.post("/mcp/transcript")

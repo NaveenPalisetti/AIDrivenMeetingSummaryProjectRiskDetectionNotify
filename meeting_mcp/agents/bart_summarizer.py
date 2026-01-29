@@ -40,7 +40,7 @@ def summarize_with_bart(tokenizer, model, transcript, meeting_id):
             logger.exception("BART summarization error: %s", e)
             bart_summary = f"[BART summarization error: {e}]"
     try:
-        raw_items = extract_tasks_structured(transcript, max_tasks=10)
+        raw_items = extract_tasks_structured(transcript, max_tasks=6)
         action_items = []
         for item in raw_items:
             action_items.append({

@@ -58,11 +58,26 @@ class OrchestratorAgent:
         }
         return mapping.get(intent, ["summarization"])
 
-    async def orchestrate(self, user_message: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Top-level orchestrate API: detect intent, create session, call routed tools, return aggregated response."""
+    async def orchestrate(
+        self,
+        user_message: str,
+        params: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Top-level orchestrate API: detect intent, call routed tools, return aggregated response.
+
+        If `session_id` is provided the orchestrator will reuse it and will not
+        create or end the session. If `session_id` is None a short-lived
+        session is created and ended around the orchestration call.
+        """
         intent = self.detect_intent(user_message)
         tool_ids = await self.route_agents(intent)
-        session_id = self.mcp_host.create_session(agent_id=self.agent_id)
+
+        created_session = False
+        if session_id is None:
+            session_id = self.mcp_host.create_session(agent_id=self.agent_id)
+            created_session = True
+
         aggregated: Dict[str, Any] = {"intent": intent, "results": {}}
 
         try:
@@ -75,7 +90,8 @@ class OrchestratorAgent:
                     logger.exception(f"Tool {tid} failed: {e}")
                     aggregated["results"][tid] = {"status": "error", "message": str(e)}
         finally:
-            self.mcp_host.end_session(session_id)
+            if created_session:
+                self.mcp_host.end_session(session_id)
 
         return aggregated
 

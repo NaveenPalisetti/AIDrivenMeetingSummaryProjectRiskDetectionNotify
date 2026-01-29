@@ -4,7 +4,11 @@ import json
 import hashlib
 import logging
 import traceback
+import uuid
 from typing import List, Dict, Any
+
+# A2A protocol types for agent metadata and message handling
+from ..protocols.a2a import AgentCard, AgentCapability, A2AMessage, PartType
 
 # Local summarizers (meeting-scoped). These mirror the behaviour in the
 # project's `mcp/agents` but live inside `meeting_mcp` to avoid importing
@@ -68,6 +72,38 @@ def get_mistral_model():
 class SummarizationAgent:
     def __init__(self, mode: str = "auto"):
         self.mode = mode
+        # A2A agent metadata for discovery
+        self.agent_card = AgentCard(
+            agent_id="summarization-agent",
+            name="Summarization Agent",
+            description="Generates meeting summaries from processed transcripts",
+            version="0.1.0",
+            base_url="",
+            capabilities=[
+                AgentCapability(name="handle_summarize_message", description="Summarize processed transcripts", parameters={"processed_transcripts": "List[str]", "mode": "str"}),
+            ],
+        )
+
+    def get_agent_card(self) -> Dict[str, Any]:
+        return self.agent_card.to_dict()
+
+    def handle_summarize_message(self, message: A2AMessage) -> A2AMessage:
+        processed: List[str] = []
+        mode: Optional[str] = None
+        for part in message.parts:
+            if part.content_type == PartType.JSON:
+                content = part.content
+                if isinstance(content, dict):
+                    processed = content.get("processed") or content.get("processed_transcripts") or content.get("transcripts") or content.get("data") or []
+                    mode = content.get("mode")
+                elif isinstance(content, list):
+                    processed = content
+                break
+
+        result = self.summarize_protocol(processed, mode=mode)
+        resp = A2AMessage(message_id=str(uuid.uuid4()), role="agent")
+        resp.add_json_part({"status": "success", "results": result})
+        return resp
 
     def summarize_protocol(self, processed_transcripts: List[str] = None, mode: str = None, **kwargs) -> Dict[str, Any]:
         processed_transcripts = processed_transcripts or []

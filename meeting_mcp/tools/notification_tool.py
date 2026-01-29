@@ -3,6 +3,7 @@ from typing import Dict, Any
 
 from meeting_mcp.core.mcp import MCPTool, MCPToolType
 from meeting_mcp.agents.notification_agent import NotificationAgent
+from meeting_mcp.protocols.a2a import A2AMessage, PartType
 
 
 class NotificationTool(MCPTool):
@@ -27,8 +28,24 @@ class NotificationTool(MCPTool):
 
         loop = asyncio.get_running_loop()
         try:
-            res = await loop.run_in_executor(None, self._agent.notify, meeting_id, summary, tasks, risks)
-            return {"status": "success", "notified": bool(res)}
+            # Build A2A message for notification
+            parts = [
+                {"type": PartType.MEETING_ID, "content": meeting_id},
+                {"type": PartType.SUMMARY, "content": summary},
+            ]
+            for t in tasks:
+                parts.append({"type": PartType.TASK, "content": t})
+            for r in risks:
+                parts.append({"type": PartType.RISK, "content": r})
+            msg = A2AMessage(
+                sender="NotificationTool",
+                recipient=NotificationAgent.AGENT_CARD.name,
+                parts=parts
+            )
+            # Call the agent handler in a thread pool
+            result_msg = await loop.run_in_executor(None, NotificationAgent.handle_notify_message, msg)
+            notified = result_msg.parts[0]["content"].get("notified") if result_msg.parts else False
+            return {"status": "success", "notified": notified}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 

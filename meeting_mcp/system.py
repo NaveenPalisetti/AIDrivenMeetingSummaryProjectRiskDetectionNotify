@@ -31,6 +31,7 @@ from meeting_mcp.tools.notification_tool import NotificationTool
 from meeting_mcp.agents.orchestrator_agent import OrchestratorAgent
 
 
+
 class InProcessHost:
     """A tiny, in-process host that mimics the minimal MCPHost API used
     by `OrchestratorAgent` for local development and testing.
@@ -68,8 +69,8 @@ def create_system(mode: str = "hybrid") -> Tuple[Any, InProcessHost, Dict[str, A
     """
     mode = (mode or "hybrid").lower()
 
-    # Always provide an in-process host for direct UI/tests
-    inproc = InProcessHost()
+    # No in-process host: always use an external MCPHost for tool execution.
+    inproc = None
 
     # Create tools/adapters
     calendar_tool = CalendarTool()
@@ -88,35 +89,21 @@ def create_system(mode: str = "hybrid") -> Tuple[Any, InProcessHost, Dict[str, A
         ,"notification": notification_tool
     }
 
-    # Register tools either on a real MCPHost (for HTTP exposure) or only
-    # on the in-process host depending on the chosen mode.
-    if mode == "in_process":
-        mcp_host = inproc
-        inproc.register_tool(calendar_tool)
-        inproc.register_tool(transcript_tool)
-        inproc.register_tool(summarization_tool)
-        inproc.register_tool(jira_tool)
-        inproc.register_tool(risk_tool)
-        inproc.register_tool(notification_tool)
-    else:
-        mcp_host = MCPHost()
-        # register on both host (for external calls) and inproc (for UI)
-        mcp_host.register_tool(calendar_tool)
-        mcp_host.register_tool(transcript_tool)
-        mcp_host.register_tool(summarization_tool)
-        mcp_host.register_tool(jira_tool)
-        mcp_host.register_tool(risk_tool)
-        mcp_host.register_tool(notification_tool)
-        inproc.register_tool(calendar_tool)
-        inproc.register_tool(transcript_tool)
-        inproc.register_tool(summarization_tool)
-        inproc.register_tool(jira_tool)
-        inproc.register_tool(risk_tool)
-        inproc.register_tool(notification_tool)
+    # Always create a real MCPHost and register tools there.
+    mcp_host = MCPHost()
+    mcp_host.register_tool(calendar_tool)
+    mcp_host.register_tool(transcript_tool)
+    mcp_host.register_tool(summarization_tool)
+    mcp_host.register_tool(jira_tool)
+    mcp_host.register_tool(risk_tool)
+    mcp_host.register_tool(notification_tool)
 
+    # Build a minimal agents registry (used by OrchestratorAgent to call
+    # agents via A2A handlers). Keyed by the tool id used in routing.
+    
     # Orchestrator wired to whichever host we consider the authoritative
-    # execution surface. In hybrid/hosted modes we use the MCPHost so
-    # orchestrations go through the registered tool layer.
+    # execution surface. Provide the agents registry so orchestrations
+    # can use A2A when appropriate, falling back to MCP tools.
     orchestrator = OrchestratorAgent(mcp_host=mcp_host)
 
     return mcp_host, inproc, tools, orchestrator

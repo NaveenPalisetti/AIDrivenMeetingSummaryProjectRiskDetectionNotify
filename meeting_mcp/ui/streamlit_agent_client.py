@@ -7,6 +7,12 @@ import streamlit as st
 import logging
 import re
 import logging
+# Ensure project root is importable when Streamlit runs the script.
+# This is a small developer convenience (prefer running Streamlit from
+# the project root or setting PYTHONPATH in production).
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # Enable debug logging to surface backend debug messages (e.g. preprocessor)
 logging.basicConfig(level=logging.DEBUG)
@@ -18,13 +24,6 @@ try:
 except Exception as _e:
     # If file logging fails, continue with console logging only
     logger.debug("setup_logging() failed in streamlit UI: %s", _e)
-    
-# Ensure project root is importable when Streamlit runs the script.
-# This is a small developer convenience (prefer running Streamlit from
-# the project root or setting PYTHONPATH in production).
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from meeting_mcp.system import create_system
 from meeting_mcp.ui.renderers import (
@@ -35,6 +34,7 @@ from meeting_mcp.ui.renderers import (
     render_summary_result,
     render_risk_result,
     render_notification_result,
+    render_jira_result,
 )
 
 
@@ -59,6 +59,28 @@ def create_runtime(mode: str = "hybrid"):
 # No runtime selector in chat-only UX; use default wiring
 mcp_host, inproc_host, tools, orchestrator = create_runtime()
 
+# Create a persistent MCP session for this Streamlit user (UI-managed)
+# On startup (or refresh) end any previously active `streamlit-user` sessions
+if "mcp_session_id" not in st.session_state:
+    try:
+        # Safely iterate over a snapshot of sessions
+        for sid, meta in list(getattr(mcp_host, "sessions", {}).items()):
+            try:
+                if meta.get("agent_id") == "streamlit-user" and meta.get("active"):
+                    mcp_host.end_session(sid)
+                    logger.debug("Ended previous streamlit-user session on startup: %s", sid)
+            except Exception:
+                logger.exception("Failed to end previous session: %s", sid)
+    except Exception as _e:
+        logger.debug("Error while checking for existing sessions: %s", _e)
+
+    try:
+        st.session_state["mcp_session_id"] = mcp_host.create_session(agent_id="streamlit-user")
+        logger.debug("Created persistent MCP session for Streamlit: %s", st.session_state.get("mcp_session_id"))
+    except Exception as _e:
+        st.session_state["mcp_session_id"] = None
+        logger.debug("Failed to create persistent MCP session: %s", _e)
+
 
 # Initialize message history in session state
 if "messages" not in st.session_state:
@@ -66,7 +88,33 @@ if "messages" not in st.session_state:
 
 
 def add_message(role: str, content: str):
-    st.session_state.messages.append({"role": role, "content": content})
+    # Central debug logging for every add_message call (truncated content)
+    try:
+        safe_content = (content[:200] + '...') if isinstance(content, str) and len(content) > 200 else content
+        logger.debug("add_message called: role=%s content=%s", role, safe_content)
+    except Exception:
+        pass
+
+    # Avoid storing empty messages or immediate duplicates (prevents empty avatar bubbles
+    # and duplicate user entries when actions trigger multiple handlers).
+    try:
+        if not content:
+            return
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        if st.session_state.messages:
+            last = st.session_state.messages[-1]
+            if last.get("role") == role and last.get("content") == content:
+                return
+        logger.debug("Appending message: role=%s content=%s", role, content)
+        st.session_state.messages.append({"role": role, "content": content})
+    except Exception:
+        # Fallback: ensure at least we append to messages
+        try:
+            logger.debug("Fallback append message: role=%s", role  )
+            st.session_state.messages.append({"role": role, "content": content})
+        except Exception:
+            pass
 
 
 def credentials_status() -> str:
@@ -117,6 +165,26 @@ with st.sidebar:
         st.markdown(f"- [Open Calendar]({calendar_url})")
     else:
         st.markdown("- Calendar: **Not configured**")
+
+    st.markdown("---")
+    st.header("MCP Session")
+    sid = st.session_state.get("mcp_session_id")
+    if sid:
+        st.write(f"Session: {sid}")
+        if st.button("End MCP Session"):
+            try:
+                mcp_host.end_session(sid)
+                st.session_state.pop("mcp_session_id", None)
+                st.success("MCP session ended")
+            except Exception as e:
+                st.error(f"Failed to end MCP session: {e}")
+    else:
+        if st.button("Start MCP Session"):
+            try:
+                st.session_state["mcp_session_id"] = mcp_host.create_session(agent_id="streamlit-user")
+                st.success("MCP session started")
+            except Exception as e:
+                st.error(f"Failed to start MCP session: {e}")
 
 col1 = st.container()
 
@@ -234,9 +302,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                 # Try to find cached processed chunks for this meeting
                 cache = st.session_state.get('processed_cache', {})
                 processed = cache.get(meeting_title)
-                add_message("user", f"Summarize meeting: {meeting_title}")
-                with st.chat_message("user"):
-                    st.markdown(f"Summarize meeting: {meeting_title}")
+                
 
                 try:
                     logger.debug("Orchestrator preprocess call: meeting=%s", matched.get('summary'))
@@ -245,7 +311,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                         preprocess_text = matched.get("description") or matched.get("summary") or ""
                         params = {"transcripts": [preprocess_text], "chunk_size": 1500}
                         logger.debug("Preprocess params: %s", {k: (str(v)[:200] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>200 else v) for k,v in params.items()})
-                        proc_result = asyncio.run(orchestrator.orchestrate(f"preprocess transcripts for {meeting_title}", params))
+                        proc_result = asyncio.run(orchestrator.orchestrate(f"preprocess transcripts for {meeting_title}", params, session_id=st.session_state.get("mcp_session_id")))
                         logger.debug("Preprocess result (truncated): %s", str(proc_result)[:1000])
                         proc_summary = proc_result.get("results", {}).get("transcript") or proc_result.get("results")
                         if isinstance(proc_summary, dict) and proc_summary.get("status") == "success":
@@ -264,7 +330,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     logger.debug("Orchestrator summarize call: meeting=%s, mode=%s", meeting_title, mode_param)
                     params = {"processed_transcripts": processed or [], "mode": mode_param}
                     logger.debug("Summarize params: processed_count=%d", len(params.get("processed_transcripts", [])))
-                    sum_result = asyncio.run(orchestrator.orchestrate(f"summarize meeting {meeting_title}", params))
+                    sum_result = asyncio.run(orchestrator.orchestrate(f"summarize meeting {meeting_title}", params, session_id=st.session_state.get("mcp_session_id")))
                     logger.debug("Summarize result (truncated): %s", str(sum_result)[:2000])
                     sum_block = sum_result.get('results', {}).get('summarization') or sum_result.get('results')
                     if isinstance(sum_block, dict) and sum_block.get('status') == 'success':
@@ -280,7 +346,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                         result = {"intent": "summarize", "results": {"summarization": summary_obj}}
 
                     # Render summary and action items
-                    add_message("assistant", f"Summary for {meeting_title} ready.")
+                    #add_message("assistant", f"Summary for {meeting_title} ready.")
                     with st.chat_message("assistant"):
                         render_summary_result(summary_obj, meeting_title, add_message, orchestrator)
                         try:
@@ -343,12 +409,10 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                 params = {"meeting_id": meeting_title, "summary": {"summary_text": matched.get('description') or matched.get('summary')}}
                 if st.session_state.get('last_action_items'):
                     params['tasks'] = st.session_state.get('last_action_items')
-                add_message("user", f"Detect risks for: {meeting_title}")
-                with st.chat_message("user"):
-                    st.markdown(f"Detect risks for: {meeting_title}")
+
                 try:
                     logger.debug("Orchestrator risk call (chat): %s", meeting_title)
-                    risk_result = asyncio.run(orchestrator.orchestrate(f"detect risk for {meeting_title}", params))
+                    risk_result = asyncio.run(orchestrator.orchestrate(f"detect risk for {meeting_title}", params, session_id=st.session_state.get("mcp_session_id")))
                     logger.debug("Risk result (chat): %s", str(risk_result)[:1000])
                     add_message("assistant", f"Risk detection for {meeting_title} completed.")
                     with st.chat_message("assistant"):
@@ -400,18 +464,15 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     task = matched.get('summary') or matched.get('task') or matched.get('title') or ''
                     owner = matched.get('assignee') or matched.get('owner') or matched.get('assigned_to') or None
                     due = matched.get('due') or matched.get('deadline') or matched.get('due_date') or None
-                    add_message('user', f"Create Jira: {task}")
-                    with st.chat_message('user'):
-                        st.markdown(f"Create Jira: {task}")
+                    
                     params = {"task": task, "owner": owner, "deadline": due}
                     logger.debug("Orchestrator jira call: task=%s", (task or '')[:200])
                     try:
-                        jira_result = asyncio.run(orchestrator.orchestrate(f"create jira for {task}", params))
+                        jira_result = asyncio.run(orchestrator.orchestrate(f"create jira for {task}", params, session_id=st.session_state.get("mcp_session_id")))
                         logger.debug("Jira result: %s", str(jira_result)[:1000])
                         add_message('assistant', f"Jira creation result: {jira_result.get('results', {})}")
                         with st.chat_message('assistant'):
-                            st.markdown(f"Jira creation result:\n\n```json\n{json.dumps(jira_result, indent=2)}\n```")
-                        
+                            render_jira_result(jira_result, title=task, add_message=add_message)
                     except Exception as e:
                         add_message('system', f"Error creating Jira: {e}")
                         with st.chat_message('assistant'):
@@ -463,13 +524,10 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     if st.session_state.get('last_risks'):
                         params['risks'] = st.session_state.get('last_risks')
 
-                    add_message('user', f"Notify team for: {meeting_title}")
-                    with st.chat_message('user'):
-                        st.markdown(f"Notify team for: {meeting_title}")
-
+                    
                     try:
                         logger.debug("Orchestrator notify call: %s", meeting_title)
-                        notify_result = asyncio.run(orchestrator.orchestrate(f"notify for {meeting_title}", params))
+                        notify_result = asyncio.run(orchestrator.orchestrate(f"notify for {meeting_title}", params, session_id=st.session_state.get("mcp_session_id")))
                         logger.debug("Notify result: %s", str(notify_result)[:1000])
                         add_message('assistant', f"Notification result for {meeting_title}: {notify_result.get('results', {})}")
                         with st.chat_message('assistant'):
@@ -539,15 +597,13 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
 
             if matched:
                 preprocess_text = matched.get("description") or matched.get("summary") or ""
-                add_message("user", f"Preprocess meeting: {matched.get('summary')}")
-                with st.chat_message("user"):
-                    st.markdown(f"Preprocess meeting: {matched.get('summary')}")
-
+                
+                
                 try:
                     params = {"transcripts": [preprocess_text], "chunk_size": 1500}
                     logger.debug("Orchestrator preprocess call (explicit): meeting=%s", matched.get('summary'))
                     logger.debug("Preprocess params: %s", {k: (str(v)[:200] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>200 else v) for k,v in params.items()})
-                    proc_result = asyncio.run(orchestrator.orchestrate(f"preprocess transcripts for {matched.get('summary')}", params))
+                    proc_result = asyncio.run(orchestrator.orchestrate(f"preprocess transcripts for {matched.get('summary')}", params, session_id=st.session_state.get("mcp_session_id")))
                     logger.debug("Preprocess result (truncated): %s", str(proc_result)[:1000])
                     # ensure downstream code that expects `result` has a value
                     result = proc_result
@@ -561,18 +617,21 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     else:
                         assistant_md = f"Preprocessing result: {proc_result}"
 
-                    add_message("assistant", assistant_md)
-                    with st.chat_message("assistant"):
-                        st.markdown(assistant_md)
-                        if isinstance(proc_summary, dict) and proc_summary.get("status") == "success":
-                            processed = proc_summary.get("processed")
-                            debug = proc_summary.get("debug") if isinstance(proc_summary, dict) else None
-                            if processed:
-                                render_processed_chunks(processed, matched.get('summary'), add_message, debug)
-                                try:
-                                    st.session_state['suppress_calendar_render'] = True
-                                except Exception:
-                                    pass
+                    # Only persist and display assistant output when preprocess succeeded
+                    if isinstance(proc_summary, dict) and proc_summary.get("status") == "success":
+                        processed = proc_summary.get("processed")
+                        debug = proc_summary.get("debug") if isinstance(proc_summary, dict) else None
+                        if processed:
+                            assistant_text = assistant_md if assistant_md and str(assistant_md).strip() else None
+                            if assistant_text:
+                                add_message("assistant", assistant_text)
+                                with st.chat_message("assistant"):
+                                    st.markdown(assistant_text)
+                                    render_processed_chunks(processed, matched.get('summary'), add_message, debug)
+                                    try:
+                                        st.session_state['suppress_calendar_render'] = True
+                                    except Exception:
+                                        pass
                 except Exception as e:
                     add_message("system", f"Error: {e}")
                     with st.chat_message("assistant"):
@@ -582,14 +641,16 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
 
         if not handled:
             logger.debug("Orchestrator free-form call: prompt=%s", (prompt or '')[:500])
-            result = asyncio.run(orchestrator.orchestrate(prompt, {}))
+            result = asyncio.run(orchestrator.orchestrate(prompt, {}, session_id=st.session_state.get("mcp_session_id")))
             logger.debug("Orchestrator free-form result (truncated): %s", str(result)[:2000])
 
         # Add a compact system entry for history (keeps messages small)
+        logger.debug("Orchestrator result intent: %s", result.get("intent", ""))
         short_summary = result.get("intent", "")
         add_message("system", f"intent: {short_summary}")
         # If a preprocess action just ran and requested suppression, avoid re-rendering calendar/JSON
         suppress = st.session_state.pop('suppress_calendar_render', False)
+
 
         # Prepare assistant content to persist in session history
         calendar_block = None if suppress else (result.get("results", {}).get("calendar") if isinstance(result, dict) else None)
@@ -613,16 +674,27 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
             # Fallback: short textual summary
             assistant_md = f"Result: intent={result.get('intent')}"
 
-        # Persist assistant summary to session history so previous responses remain
-        add_message("assistant", assistant_md)
-
-        # Render assistant response using centralized renderers
-        with st.chat_message("assistant"):
-            if calendar_block:
-                render_calendar_result(calendar_block, orchestrator, add_message)
+        # Persist and render assistant summary only when there is meaningful content.
+        # If a successful calendar_block with events is present, show the calendar renderer
+        # and persist the assistant summary; otherwise only show the JSON fallback when
+        # rendering is not suppressed and we have a non-empty assistant_md.
+        if calendar_block and calendar_block.get("status") == "success":
+            events = calendar_block.get("events", [])
+            if events:
+                assistant_text = assistant_md if assistant_md and str(assistant_md).strip() else None
+                if assistant_text:
+                    add_message("assistant", assistant_text)
+                    with st.chat_message("assistant"):
+                        render_calendar_result(calendar_block, orchestrator, add_message)
             else:
-                # If we suppressed rendering (e.g. after a preprocess action), don't show raw JSON fallback
-                if not suppress:
+                # No events -> skip creating an assistant bubble
+                pass
+        else:
+            # Fallback: only show JSON result when rendering not suppressed
+            if not suppress and assistant_md and str(assistant_md).strip():
+                logger.debug("Rendering fallback assistant_md and JSON result")
+                add_message("assistant", assistant_md)
+                with st.chat_message("assistant"):
                     st.markdown("Result:\n\n" + "```json\n" + json.dumps(result, indent=2) + "\n```")
     except Exception as e:
         add_message("system", f"Error: {e}")

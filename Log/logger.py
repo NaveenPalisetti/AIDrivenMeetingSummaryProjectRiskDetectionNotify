@@ -37,8 +37,9 @@ def setup_logging(log_dir: str = None, log_file_name: str = "meeting_mcp.log", l
         console.setFormatter(logging.Formatter("%(levelname)s:%(name)s: %(message)s"))
         root.addHandler(console)
 
-    logging.getLogger("uvicorn").setLevel(logging.INFO)
-    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
-    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    # Set uvicorn loggers to the same level as the configured root level
+    logging.getLogger("uvicorn").setLevel(level)
+    logging.getLogger("uvicorn.error").setLevel(level)
+    logging.getLogger("uvicorn.access").setLevel(level)
 
     return log_path
