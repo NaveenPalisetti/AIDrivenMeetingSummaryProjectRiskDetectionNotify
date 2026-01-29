@@ -1,6 +1,9 @@
 import json
 import asyncio
+import logging
 import streamlit as st
+
+logger = logging.getLogger("meeting_mcp.ui.renderers")
 
 
 _CSS = """
@@ -9,6 +12,45 @@ _CSS = """
     .sub-header { font-size: 1rem; color: #666; margin-bottom: 1rem; }
     .badge { display:inline-block; padding:0.2rem .6rem; border-radius:4px; background:#f0f0f0; margin-right:6px; }
     .credentials { background:#fff; padding:0.5rem; border-radius:6px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    /* Table / DataFrame styling */
+    div[role="table"] table, table {
+        width: 100% !important;
+        border-collapse: collapse;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+        font-size: 14px;
+        color: #222;
+    }
+    div[role="table"] table th, table th {
+        text-align: left;
+        padding: 10px 12px;
+        background: linear-gradient(180deg,#fbfdff,#f3f7fb);
+        border-bottom: 1px solid #e6eef6;
+        font-weight: 600;
+        color: #123;
+    }
+    div[role="table"] table td, table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid #f3f6f9;
+    }
+    div[role="table"] tr:hover td, table tr:hover td {
+        background: rgba(31,119,180,0.03);
+    }
+
+    /* Expander / panels */
+    .streamlit-expanderHeader {
+        font-weight: 600;
+        color: #1f77b4;
+    }
+    .stDownloadButton>button, button[kind="primary"] {
+        background-color: #1f77b4 !important;
+        color: #fff !important;
+        border-radius: 6px !important;
+        padding: 6px 10px !important;
+    }
+
+    /* Chat / headers */
+    .main-header { margin-bottom: 0.5rem; }
+    .sub-header { margin-top: 0; }
 </style>
 """
 
@@ -67,7 +109,7 @@ def render_processed_chunks(processed, title, add_message, debug: dict | None = 
                 st.write(debug)
 
 
-def render_summary_result(summary_obj, title, add_message):
+def render_summary_result(summary_obj, title, add_message, orchestrator=None):
     """Render a structured summary result (summary text/list and action items).
     Accepts either a string summary or a dict with keys `summary` and `action_items`.
     """
@@ -108,21 +150,27 @@ def render_summary_result(summary_obj, title, add_message):
             st.session_state['last_action_items'] = ais
         except Exception:
             pass
-        # Build table rows
+
+        # Build table rows ensuring required fields: summary, assignee, issue_type, due_date
         rows = []
         for ai in ais:
             if isinstance(ai, dict):
-                # normalize possible keys from different summarizers (mistral vs bart vs extractor)
-                owner = ai.get('assignee') or ai.get('owner') or ai.get('assigned_to') or "Unassigned"
                 summary_field = ai.get('summary') or ai.get('task') or ai.get('title') or str(ai)
-                due = ai.get('due') or ai.get('due_date') or ai.get('deadline') or ""
-                confidence = ai.get('confidence') if isinstance(ai.get('confidence'), (int, float)) else ai.get('confidence', "")
+                assignee = ai.get('assignee') or ai.get('owner') or ai.get('assigned_to') or "Unassigned"
+                issue_type = ai.get('issue_type') or ai.get('type') or ai.get('ticket_type') or ai.get('issueType') or ""
+                due_date = ai.get('due') or ai.get('due_date') or ai.get('deadline') or ""
             else:
-                owner = "Unassigned"
                 summary_field = str(ai)
-                due = ""
-                confidence = ""
-            rows.append({"Action": summary_field, "Owner": owner, "Due": due, "Confidence": confidence})
+                assignee = "Unassigned"
+                issue_type = ""
+                due_date = ""
+
+            rows.append({
+                "Summary": summary_field,
+                "Assignee": assignee,
+                "Issue Type": issue_type,
+                "Due Date": due_date,
+            })
 
         # Display as a table for clarity
         try:
@@ -135,13 +183,14 @@ def render_summary_result(summary_obj, title, add_message):
 
         # For each item, provide an expander with full details and quick actions
         for idx, ai in enumerate(ais):
-            title = (ai.get('summary') or ai.get('task') or ai.get('title')) if isinstance(ai, dict) else str(ai)
-            with st.expander(f"Details — {title[:80]}", expanded=False):
+            item_title = (ai.get('summary') or ai.get('task') or ai.get('title')) if isinstance(ai, dict) else str(ai)
+            with st.expander(f"Details — {item_title[:80]}", expanded=False):
                 if isinstance(ai, dict):
-                    st.markdown(f"**Action:** {ai.get('summary') or ai.get('task') or ai.get('title')}")
-                    st.markdown(f"**Owner:** {ai.get('assignee') or ai.get('owner') or ai.get('assigned_to') or 'Unassigned'}")
+                    st.markdown(f"**Summary:** {ai.get('summary') or ai.get('task') or ai.get('title')}")
+                    st.markdown(f"**Assignee:** {ai.get('assignee') or ai.get('owner') or ai.get('assigned_to') or 'Unassigned'}")
+                    st.markdown(f"**Issue Type:** {ai.get('issue_type') or ai.get('type') or ai.get('ticket_type') or ai.get('issueType') or ''}")
                     if ai.get('due') or ai.get('deadline') or ai.get('due_date'):
-                        st.markdown(f"**Due:** {ai.get('due') or ai.get('deadline') or ai.get('due_date')}")
+                        st.markdown(f"**Due Date:** {ai.get('due') or ai.get('deadline') or ai.get('due_date')}")
                     if ai.get('raw'):
                         st.markdown(f"**Raw:** {ai.get('raw')}")
                 else:
@@ -156,7 +205,35 @@ def render_summary_result(summary_obj, title, add_message):
                         st.info("Edit clicked — implement inline edit flow.")
                 with cols[2]:
                     if st.button(f"Create Jira", key=f"jira_{idx}"):
-                        st.info("Create Jira clicked — implement jira agent call.")
+                        # Build params consistent with streamlit_agent_client chat flow
+                        task = ai.get('summary') or ai.get('task') or ai.get('title') or ''
+                        owner = ai.get('assignee') or ai.get('owner') or ai.get('assigned_to') or None
+                        due = ai.get('due') or ai.get('deadline') or ai.get('due_date') or None
+                        add_message('user', f"Create Jira: {task}")
+                        with st.chat_message('user'):
+                            st.markdown(f"Create Jira: {task}")
+
+                        params = {"task": task, "owner": owner, "deadline": due}
+                        if orchestrator is None:
+                            st.info("Orchestrator not available — cannot create Jira.")
+                        else:
+                            try:
+                                logger.debug("Create Jira clicked: task=%s owner=%s due=%s", task, owner, due)
+                                jira_result = asyncio.run(orchestrator.orchestrate(f"create jira for {task}", params))
+                                logger.debug("Jira result received: %s", str(jira_result)[:1000])
+                                st.markdown(f"Jira creation result:\n\n```json\n{json.dumps(jira_result, indent=2)}\n```")
+                                try:
+                                    # Persist assistant history for created Jira
+                                    add_message('assistant', f"Jira creation result: {jira_result.get('results', {})}")
+                                except Exception:
+                                    pass
+                            except Exception as e:
+                                logger.exception("Error creating Jira: %s", e)
+                                st.markdown(f"Error creating Jira: {e}")
+                                try:
+                                    add_message('system', f"Error creating Jira: {e}")
+                                except Exception:
+                                    pass
 
 
 def render_calendar_result(calendar_block, orchestrator, add_message):
@@ -199,7 +276,7 @@ def render_calendar_result(calendar_block, orchestrator, add_message):
                     if ev.get("description"):
                         st.markdown(f"**Description:**\n\n{ev.get('description')}")
                     if ev.get("htmlLink"):
-                        st.markdown(f"[Open in Google Calendar]({ev.get('htmlLink')})")
+                        st.markdown(f"[Open in Google Calendar]({ev.get('htmlLink')})")                        
 
                     preprocess_text = ev.get("description") or ev.get("summary") or ""
                     if preprocess_text:
@@ -286,9 +363,9 @@ def render_calendar_result(calendar_block, orchestrator, add_message):
                                 add_message("assistant", f"Summary for {meeting_title} ready.")
                                 with st.chat_message("assistant"):
                                     try:
-                                        render_summary_result(summary_obj, meeting_title, add_message)
+                                        render_summary_result(summary_obj, meeting_title, add_message, orchestrator)
                                     except Exception:
-                                        st.write(summary_obj)
+                                            st.write(summary_obj)
                                     try:
                                         st.session_state['suppress_calendar_render'] = True
                                     except Exception:
@@ -464,7 +541,6 @@ def render_notification_result(notify_obj, title: str | None, add_message):
             add_message('assistant', f"Notification status: {status}")
         except Exception:
             pass
-
         # Offer full payload for debugging
         with st.expander("Full notification payload", expanded=False):
             try:

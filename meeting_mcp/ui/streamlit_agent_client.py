@@ -6,10 +6,11 @@ import os
 import streamlit as st
 import logging
 import re
+import logging
 
 # Enable debug logging to surface backend debug messages (e.g. preprocessor)
 logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("meeting_mcp.ui.streamlit")
+logger = logging.getLogger("meeting_mcp.ui.streamlit_agent_client")
 # Also attach the project's rotating file logger so Streamlit logs go to Log/meeting_mcp.log
 try:
     from Log.logger import setup_logging
@@ -17,7 +18,7 @@ try:
 except Exception as _e:
     # If file logging fails, continue with console logging only
     logger.debug("setup_logging() failed in streamlit UI: %s", _e)
-
+    
 # Ensure project root is importable when Streamlit runs the script.
 # This is a small developer convenience (prefer running Streamlit from
 # the project root or setting PYTHONPATH in production).
@@ -35,6 +36,7 @@ from meeting_mcp.ui.renderers import (
     render_risk_result,
     render_notification_result,
 )
+
 
 # Page config
 st.set_page_config(
@@ -94,6 +96,27 @@ with st.sidebar:
     model_choice = st.radio("Choose a summarizer:", ["BART", "Mistral"], key="summarizer_model")
     # (Risk detection is handled via chat commands and per-event buttons,
     # not via the sidebar. Use "detect risk" or the calendar event actions.)
+    st.markdown("---")
+    st.header("Quick Links")
+    # Display clickable quick links (read from session state or environment variables)
+    jira_url = st.session_state.get('jira_url') or os.environ.get('JIRA_DASHBOARD_URL', '')
+    slack_url = st.session_state.get('slack_url') or os.environ.get('SLACK_URL', '')
+    calendar_url = st.session_state.get('calendar_url') or os.environ.get('CALENDAR_URL', '')
+
+    if jira_url:
+        st.markdown(f"- [Open Jira dashboard]({jira_url})")
+    else:
+        st.markdown("- Jira dashboard: **Not configured**")
+
+    if slack_url:
+        st.markdown(f"- [Open Slack]({slack_url})")
+    else:
+        st.markdown("- Slack: **Not configured**")
+
+    if calendar_url:
+        st.markdown(f"- [Open Calendar]({calendar_url})")
+    else:
+        st.markdown("- Calendar: **Not configured**")
 
 col1 = st.container()
 
@@ -113,6 +136,56 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
         # Ensure `result` is always defined to avoid NameError in downstream handling
         result = {"intent": "", "results": {}}
         lower = (prompt or "").lower()
+        # Local greeting handler: intercept simple greetings and return a short canned reply
+        try:
+            greeting_re = r"^\s*(hi|hello|hey|good morning|good afternoon|good evening|how are you|how can you help|what can you do)\b"
+            if re.search(greeting_re, lower):
+                canned = (
+                    "AI Orchestrator Help:\n\n"
+                    "Calendar / Fetch:\n"
+                    "- Commands: 'fetch calendar', 'get calendar events', or free-form like 'show my calendar for next 7 days'\n"
+                    "- Result: events are displayed in the calendar renderer with per-event actions.\n\n"
+                    "Preprocess (chat or per-event button):\n"
+                    "- Chat examples:\n"
+                    "  * 'preprocess this meeting' (uses last fetched events)\n"
+                    "  * 'preprocess transcripts for Project Sync'\n"
+                    "- Per-event: click 'Preprocess this meeting' inside an event expander.\n\n"
+                    "Summarize (chat or per-event button):\n"
+                    "- Chat examples:\n"
+                    "  * 'summarize this meeting'\n"
+                    "  * 'summarize \"Project Sync Jan 20 2026\"'\n"
+                    "  * 'summarize meeting: \"Weekly Standup\"'\n"
+                    "- Per-event: click 'Summarize this meeting'.\n\n"
+                    "Create Jira (chat or per-action):\n"
+                    "- Chat examples:\n"
+                    "  * 'create jira: Fix the payment bug'\n"
+                    "  * 'create jira for \"Update deployment pipeline\"'\n"
+                    "  * 'create jira 1' (refers to indexed last action items)\n"
+                    "- Per-action: click 'Create Jira' inside an action-item expander.\n\n"
+                    "Detect Risks (chat or per-event):\n"
+                    "- Chat examples:\n"
+                    "  * 'detect risk for \"Project Sync Jan 20 2026\"'\n"
+                    "  * 'detect risks for this meeting'\n"
+                    "- Per-event: click 'Detect Risks for this meeting'.\n\n"
+                    "Notify (chat or per-event):\n"
+                    "- Chat examples:\n"
+                    "  * 'notify team for \"Project Sync Jan 20 2026\"'\n"
+                    "  * 'send notification for this meeting'\n"
+                    "- Per-event: click 'Notify team for this meeting'.\n\n"
+                    "Flow (example sequence):\n"
+                    "1) 'preprocess \"Meeting Title\"' or click Preprocess.\n"
+                    "2) 'summarize \"Meeting Title\"' or click Summarize.\n"
+                    "3) 'detect risks for \"Meeting Title\"' or click Detect Risks.\n"
+                    "4) 'notify team for \"Meeting Title\"' or click Notify.\n\n"
+                    "Use the sidebar to switch summarizers (BART / Mistral) and open Quick Links for Jira/Slack/Calendar."
+                )
+                add_message("assistant", canned)
+                with st.chat_message("assistant"):
+                    st.markdown(canned)
+                handled = True
+        except Exception:
+            # If greeting handler fails, fall back to normal flow
+            handled = False
         # Summarize command: if user asks to summarize a previously preprocessed meeting
         if "summarize" in lower and st.session_state.get("last_events"):
             import re
@@ -209,7 +282,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     # Render summary and action items
                     add_message("assistant", f"Summary for {meeting_title} ready.")
                     with st.chat_message("assistant"):
-                        render_summary_result(summary_obj, meeting_title, add_message)
+                        render_summary_result(summary_obj, meeting_title, add_message, orchestrator)
                         try:
                             st.session_state['suppress_calendar_render'] = True
                         except Exception:
@@ -338,6 +411,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                         add_message('assistant', f"Jira creation result: {jira_result.get('results', {})}")
                         with st.chat_message('assistant'):
                             st.markdown(f"Jira creation result:\n\n```json\n{json.dumps(jira_result, indent=2)}\n```")
+                        
                     except Exception as e:
                         add_message('system', f"Error creating Jira: {e}")
                         with st.chat_message('assistant'):
@@ -523,6 +597,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
             events = calendar_block.get("events", [])
             # persist most recent fetched events so chat commands can reference them
             st.session_state['last_events'] = events
+            
             # Build a concise markdown summary for session history
             if not events:
                 assistant_md = "No calendar events found for the requested range."

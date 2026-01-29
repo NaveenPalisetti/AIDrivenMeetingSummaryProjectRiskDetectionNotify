@@ -41,12 +41,12 @@ def get_bart_model():
 
 
 def get_mistral_model():
-    if os.environ.get("MISTRAL_ENABLED", "0") != "1":
-        raise RuntimeError("Mistral support is disabled. Set MISTRAL_ENABLED=1 and provide model path to enable.")
+    # Attempt to load a local Mistral model when requested by mode.
+    # Do not require an environment flag — selection of mode ('mistral') drives loading.
     if not hasattr(get_mistral_model, "tokenizer") or not hasattr(get_mistral_model, "model"):
         model_path = mm_config.get_mistral_model_path() or os.environ.get("MISTRAL_MODEL_PATH") or "/content/mistral-7B-Instruct-v0.2"
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Mistral model path not found: {model_path}")
+            raise FileNotFoundError(f"Mistral model path not found: {model_path}. Set a valid path via meeting_mcp.config or the MISTRAL_MODEL_PATH env var.")
         logger.info("Loading Mistral model from: %s", model_path)
         from transformers import AutoTokenizer, AutoModelForCausalLM
         from transformers import BitsAndBytesConfig
