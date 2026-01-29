@@ -425,6 +425,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                 handled = True
         # Create Jira command: allow user to type "create jira: <task>" or "create jira for <task>"
         if ("create jira" in lower or "createissue" in lower) and st.session_state.get('last_action_items'):
+            
             try:
                 import re
                 # Extract quoted title first

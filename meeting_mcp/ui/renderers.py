@@ -185,6 +185,7 @@ def render_summary_result(summary_obj, title, add_message, orchestrator=None):
         ais = summary_obj.get('action_items')
         # persist last action items for chat commands (e.g., 'create jira: <task>')
         try:
+            logger.debug(f"[render_summary_result] Persisting last_action_items for '{title}' with {len(ais)} items.") 
             st.session_state['last_action_items'] = ais
         except Exception as e:
             logger.exception(f"[render_summary_result] Exception persisting last_action_items: {e}")

@@ -8,6 +8,14 @@ from typing import List, Dict, Any
 class PartType(Enum):
     TEXT = "text/plain"
     JSON = "application/json"
+    # Semantic part types used by agents/tools
+    MEETING_ID = "meeting_id"
+    SUMMARY = "summary"
+    TASK = "task"
+    ACTION_ITEM = "action_item"
+    PROGRESS = "progress"
+    RESULT = "result"
+    RISK = "risk"
 
 
 @dataclass
