@@ -51,8 +51,8 @@ class OrchestratorAgent:
             "calendar": ["calendar"],
             "preprocess": ["transcript"],
             "summarize": ["summarization"],
-            "risk": ["risk"],
-            "jira": ["jira_tool"],
+            "risk": ["risk"],        
+            "jira": ["jira"],
             "notify": ["notification"],
             "default": ["summarization"]
         }
