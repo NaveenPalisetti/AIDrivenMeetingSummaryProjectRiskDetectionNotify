@@ -129,6 +129,17 @@ def credentials_status() -> str:
     return "No credentials found — set MCP_SERVICE_ACCOUNT_FILE or place credentials.json in meeting_mcp/config/"
 
 
+def _load_local_credentials():
+    try:
+        cred_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../config/credentials.json"))
+        if os.path.exists(cred_path):
+            with open(cred_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
 render_css()
 
 # Page heading similar to orchestrator_streamlit_client
@@ -146,10 +157,40 @@ with st.sidebar:
     # not via the sidebar. Use "detect risk" or the calendar event actions.)
     st.markdown("---")
     st.header("Quick Links")
-    # Display clickable quick links (read from session state or environment variables)
-    jira_url = st.session_state.get('jira_url') or os.environ.get('JIRA_DASHBOARD_URL', '')
-    slack_url = st.session_state.get('slack_url') or os.environ.get('SLACK_URL', '')
-    calendar_url = st.session_state.get('calendar_url') or os.environ.get('CALENDAR_URL', '')
+    # Display clickable quick links (read from session state, env, or credentials file)
+    creds = st.session_state.get('credentials_cache')
+    if creds is None:
+        creds = _load_local_credentials()
+        st.session_state['credentials_cache'] = creds
+
+    # Accept multiple common credential key variants to be resilient to naming
+    def _pick(*keys, default=''):
+        for k in keys:
+            # check session override first
+            if k == 'jira_url' and st.session_state.get('jira_url'):
+                return st.session_state.get('jira_url')
+            if k == 'slack_url' and st.session_state.get('slack_url'):
+                return st.session_state.get('slack_url')
+            if k == 'calendar_url' and st.session_state.get('calendar_url'):
+                return st.session_state.get('calendar_url')
+            # then environment
+            v = os.environ.get(k)
+            if v:
+                return v
+            # then credentials file (various casings)
+            if creds:
+                for variant in (k, k.upper(), k.lower()):
+                    try:
+                        v = creds.get(variant)
+                    except Exception:
+                        v = None
+                    if v:
+                        return v
+        return default
+
+    jira_url = _pick('JIRA_DASHBOARD_URL', 'JIRA_URL', 'jira_url')
+    slack_url = _pick('SLACK_URL', 'slack_url')
+    calendar_url = _pick('CALENDAR_URL', 'calendar_url')
 
     if jira_url:
         st.markdown(f"- [Open Jira dashboard]({jira_url})")
@@ -208,6 +249,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
         try:
             greeting_re = r"^\s*(hi|hello|hey|good morning|good afternoon|good evening|how are you|how can you help|what can you do)\b"
             if re.search(greeting_re, lower):
+                print("Greeting detected in prompt")
                 canned = (
                     "AI Orchestrator Help:\n\n"
                     "Calendar / Fetch:\n"
@@ -359,9 +401,9 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                         st.markdown(f"Error: {e}")
 
                 handled = True
-        # Detect risk command: mirror summarize flow but call orchestrator with risk intent
+        # Detect risk command: mirror summarize flow but call orchestrator with risk intent        
         if ("detect risk" in lower or "risk" in lower) and st.session_state.get("last_events"):
-
+            print("Risk detection command detected in chat")
             title = None
             mq = re.search(r'["\u201c\u201d](?P<tq>[^"\u201c\u201d]+)["\u201c\u201d]', prompt)
             if mq:
@@ -402,7 +444,42 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     if title.lower() in summary.lower() or summary.lower() in title.lower():
                         matched = ev
                         break
+            # Additional fallbacks when the initial heuristics don't match:
+            # 1) Compare prompt word-overlap against event summaries (robust fuzzy match)
+            # 2) If still no match, pick the most-recent event as a reasonable default
+            if not matched:
+                try:
+                    prompt_words = set(re.findall(r"\w+", prompt.lower()))
+                    best = None
+                    best_score = 0
+                    for ev in st.session_state.get("last_events", []):
+                        summary = (ev.get("summary") or "")
+                        if not summary:
+                            continue
+                        s_words = set(re.findall(r"\w+", summary.lower()))
+                        score = sum(1 for w in s_words if w in prompt_words)
+                        if score > best_score:
+                            best_score = score
+                            best = ev
+                    if best_score > 0:
+                        matched = best
+                except Exception:
+                    matched = None
 
+            if not matched:
+                try:
+                    events = list(st.session_state.get("last_events", []))
+                    if events:
+                        # pick most-recent by start datetime as a sensible default
+                        def _start_key(ev):
+                            sd = ev.get('start', {}).get('dateTime') or ev.get('start', {}).get('date') or ''
+                            return sd
+                        events_sorted = sorted(events, key=_start_key, reverse=True)
+                        matched = events_sorted[0]
+                except Exception:
+                    matched = None
+
+            print("Risk detection matched event: ", matched)
             if matched:
                 meeting_title = matched.get('summary') or matched.get('id')
                 # Build params similar to event-based detect
@@ -416,7 +493,13 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     logger.debug("Risk result (chat): %s", str(risk_result)[:1000])
                     add_message("assistant", f"Risk detection for {meeting_title} completed.")
                     with st.chat_message("assistant"):
-                                render_risk_result(risk_result, meeting_title if 'meeting_title' in locals() else None, add_message)
+                        render_risk_result(risk_result, meeting_title if 'meeting_title' in locals() else None, add_message)
+                        try:
+                            st.session_state['suppress_calendar_render'] = True
+                        except Exception:
+                            pass
+                    
+                
                 except Exception as e:
                     add_message("system", f"Error running risk detection: {e}")
                     with st.chat_message("assistant"):
@@ -440,6 +523,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
 
                 matched = None
                 items = st.session_state.get('last_action_items', [])
+                logger.debug("Create Jira command: title=%s, items_count=%d, items = %s", title, len(items),items)   
                 if title:
                     # try numeric index
                     if title.isdigit():
@@ -466,14 +550,29 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     owner = matched.get('assignee') or matched.get('owner') or matched.get('assigned_to') or None
                     due = matched.get('due') or matched.get('deadline') or matched.get('due_date') or None
                     
-                    params = {"task": task, "owner": owner, "deadline": due}
+                    # Build params for orchestrator and also include `action_items` list
+                    action_item = {"summary": task, "assignee": owner, "due_date": due}
+                    params = {"task": task, "owner": owner, "deadline": due, "action_items": [action_item], "action_items_list": [action_item]}
+                    # Debug: log the matched item and the params in full (truncated for long fields)
+                    logger.debug("Matched action item for Jira: %s", matched)
                     logger.debug("Orchestrator jira call: task=%s", (task or '')[:200])
+                    logger.debug("Jira params: %s", {k: (str(v)[:200] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>200 else v) for k,v in params.items()})
+                    print("Jira params: %s" % {k: (str(v)[:200] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>200 else v) for k,v in params.items()})
                     try:
                         jira_result = asyncio.run(orchestrator.orchestrate(f"create jira for {task}", params, session_id=st.session_state.get("mcp_session_id")))
                         logger.debug("Jira result: %s", str(jira_result)[:1000])
+                        # Persist the orchestrator result so the UI shows the correct intent later
+                        try:
+                            result = {"intent": "create_jira", "results": jira_result}
+                        except Exception:
+                            result = {"intent": "create_jira", "results": {}}
                         add_message('assistant', f"Jira creation result: {jira_result.get('results', {})}")
                         with st.chat_message('assistant'):
                             render_jira_result(jira_result, title=task, add_message=add_message)
+                        try:
+                            st.session_state['suppress_calendar_render'] = True
+                        except Exception:
+                            pass   
                     except Exception as e:
                         add_message('system', f"Error creating Jira: {e}")
                         with st.chat_message('assistant'):
@@ -483,6 +582,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                 logger.exception("Failed to handle create jira command: %s", e)
         # Notify command: allow user to type "notify <meeting>" or "send notification for <meeting>"
         if ("notify" in lower or "send notification" in lower or "notify team" in lower) and st.session_state.get('last_events'):
+            print("Notify command detected in chat",st.session_state.get('last_events'))
             try:
                 import re
                 title = None
@@ -516,24 +616,60 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                             best = ev
                     if best_score > 0:
                         matched = best
+                # Additional fallbacks when no exact/title match found:
+                if not matched:
+                    try:
+                        prompt_words = set(re.findall(r"\w+", prompt.lower()))
+                        best = None
+                        best_score = 0
+                        for ev in items:
+                            text = (ev.get('summary') or ev.get('description') or '')
+                            if not text:
+                                continue
+                            s_words = set(re.findall(r"\w+", text.lower()))
+                            score = sum(1 for w in s_words if w in prompt_words)
+                            if score > best_score:
+                                best_score = score
+                                best = ev
+                        if best_score > 0:
+                            matched = best
+                    except Exception:
+                        matched = None
 
+                if not matched:
+                    try:
+                        events = list(items)
+                        if events:
+                            def _start_key(ev):
+                                sd = ev.get('start', {}).get('dateTime') or ev.get('start', {}).get('date') or ''
+                                return sd
+                            events_sorted = sorted(events, key=_start_key, reverse=True)
+                            matched = events_sorted[0]
+                    except Exception:
+                        matched = None
+
+                print("Notify matched event: ", matched)
                 if matched:
                     meeting_title = matched.get('summary') or matched.get('id')
                     params = {"meeting_id": meeting_title, "summary": {"summary_text": matched.get('description') or matched.get('summary')}}
                     if st.session_state.get('last_action_items'):
                         params['tasks'] = st.session_state.get('last_action_items')
-                    if st.session_state.get('last_risks'):
+                    if st.session_state.get('last_risks_details'):
                         params['risks'] = st.session_state.get('last_risks')
 
-                    
+                    print("Notify matched event: ", matched)
                     try:
-                        logger.debug("Orchestrator notify call: %s", meeting_title)
+                        logger.debug("Orchestrator notify call: %s", params)
                         notify_result = asyncio.run(orchestrator.orchestrate(f"notify for {meeting_title}", params, session_id=st.session_state.get("mcp_session_id")))
                         logger.debug("Notify result: %s", str(notify_result)[:1000])
                         add_message('assistant', f"Notification result for {meeting_title}: {notify_result.get('results', {})}")
                         with st.chat_message('assistant'):
                             try:
                                 render_notification_result(notify_result, meeting_title, add_message)
+                                try:
+                                    st.session_state['suppress_calendar_render'] = True
+                                except Exception:
+                                    pass
                             except Exception:
                                 st.markdown(f"Notification result:\n\n```json\n{json.dumps(notify_result, indent=2)}\n```")
                     except Exception as e:

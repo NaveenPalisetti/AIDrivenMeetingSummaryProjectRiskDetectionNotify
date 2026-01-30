@@ -56,6 +56,24 @@ class MessagePart:
 
     def to_dict(self) -> Dict[str, Any]:
         return {"part_id": self.part_id, "content_type": self.content_type.value, "content": self.content}
+    
+    # Compatibility: allow dict-like access via .get("type") and .get("content") used across codebase
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in ("type", "content_type"):
+            return self.content_type
+        if key == "content":
+            return self.content
+        if key == "part_id":
+            return self.part_id
+        return default
+    
+    # Compatibility: allow subscription access like part["content"] used elsewhere
+    def __getitem__(self, key: str) -> Any:
+        val = self.get(key, None)
+        # If asking for 'type' return the enum value or its raw value to preserve older checks
+        if key == "type":
+            return val
+        return val
 
 
 @dataclass
@@ -63,6 +81,36 @@ class A2AMessage:
     message_id: str
     role: str
     parts: List[MessagePart] = field(default_factory=list)
+
+    def __post_init__(self):
+        # Normalize parts: allow callers to pass dicts like {"type": PartType.X, "content": ...}
+        normalized: List[MessagePart] = []
+        for p in list(self.parts or []):
+            if isinstance(p, MessagePart):
+                normalized.append(p)
+                continue
+            # dict-like part accepted
+            if isinstance(p, dict):
+                pid = p.get("part_id") or str(uuid.uuid4())
+                # content type may be provided under 'content_type' or 'type'
+                ctype = p.get("content_type") if "content_type" in p else p.get("type")
+                # If ctype is already a PartType enum, keep it; if it's a string, try to convert
+                if isinstance(ctype, PartType):
+                    content_type = ctype
+                else:
+                    try:
+                        content_type = PartType(ctype)
+                    except Exception:
+                        # Fallback: if ctype is None or unknown, default to TEXT
+                        content_type = PartType.TEXT
+                content = p.get("content")
+                normalized.append(MessagePart(pid, content_type, content))
+                continue
+            # Any other type: coerce to text part
+            pid = str(uuid.uuid4())
+            normalized.append(MessagePart(pid, PartType.TEXT, str(p)))
+
+        self.parts = normalized
 
     def add_text_part(self, text: str) -> str:
         pid = str(uuid.uuid4())

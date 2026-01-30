@@ -4,6 +4,7 @@ from typing import Dict, Any
 from meeting_mcp.core.mcp import MCPTool, MCPToolType
 from meeting_mcp.agents.risk_detection_agent import RiskDetectionAgent
 from meeting_mcp.protocols.a2a import A2AMessage, PartType
+import uuid
 
 
 class RiskTool(MCPTool):
@@ -20,6 +21,7 @@ class RiskTool(MCPTool):
         self._agent = RiskDetectionAgent()
 
     async def execute(self, params: Dict[str, Any] = None) -> Dict[str, Any]:
+        print("RiskTool.execute called")
         params = params or {}
         meeting_id = params.get("meeting_id", "ui_session")
         summary = params.get("summary", {})
@@ -37,12 +39,9 @@ class RiskTool(MCPTool):
                 parts.append({"type": PartType.TASK, "content": t})
             if progress:
                 parts.append({"type": PartType.PROGRESS, "content": progress})
-            msg = A2AMessage(
-                sender="RiskTool",
-                recipient=RiskDetectionAgent.AGENT_CARD.name,
-                parts=parts
-            )
+            msg = A2AMessage(message_id=str(uuid.uuid4()), role="client", parts=parts)
             # Call the agent handler in a thread pool
+            print("RiskDetectionAgent.detect_jira_risks  ",msg)
             result_msg = await loop.run_in_executor(None, RiskDetectionAgent.handle_detect_risk_message, msg)
             risks = result_msg.parts[0]["content"].get("risks") if result_msg.parts else []
 

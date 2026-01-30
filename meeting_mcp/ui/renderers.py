@@ -1,6 +1,7 @@
 import json
 import asyncio
 import logging
+import os
 import streamlit as st
 
 logger = logging.getLogger("meeting_mcp.ui.renderers")
@@ -84,19 +85,19 @@ def render_processed_chunks(processed, title, add_message, debug: dict | None = 
         preview = chunk if len(chunk) <= 200 else chunk[:200].rstrip() + '...'
         rows.append({"Chunk": i + 1, "Preview": preview})
     st.table(rows)
-    for i, chunk in enumerate(processed):
-        with st.expander(f"Chunk {i+1}"):
-            try:
-                safe_key = f"{safe_title}_chunk_{i+1}"
-            except Exception:
-                safe_key = f"chunk_{i+1}"
-            # use a string label (empty string allowed) to avoid type errors
-            st.text_area(label=f"Chunk {i+1}", value=chunk, height=300, key=safe_key)
 
+    # create a safe_title for unique widget keys (avoid collisions across reruns/pages)
     try:
         safe_title = title.replace(' ', '_').replace('/', '_')
     except Exception:
         safe_title = 'processed_transcript'
+
+    for i, chunk in enumerate(processed):
+        with st.expander(f"Chunk {i+1}"):
+            safe_key = f"{safe_title}_chunk_{i+1}"
+            # use a string label (empty string allowed) to avoid type errors
+            st.text_area(label=f"Chunk {i+1}", value=chunk, height=300, key=safe_key)
+
     joined = "\n\n".join(processed)
     st.download_button(f"Download processed transcript", data=joined, file_name=f"{safe_title}_processed.txt", mime="text/plain")
 
@@ -566,9 +567,51 @@ def render_risk_result(risk_obj, title: str | None, add_message):
             summary_risks = []
             jira_risks = []
 
-    # Persist last risks for later actions
+    # Persist last risks for later actions (keep a flat list for backwards compatibility
+    # and also store structured details for callers that need the separate lists)
     try:
-        st.session_state['last_risks'] = risks
+        combined = []
+        try:
+            combined = list(risks or [])
+        except Exception:
+            combined = []
+        try:
+            if summary_risks:
+                # avoid duplicates
+                combined += [r for r in summary_risks if r not in combined]
+        except Exception:
+            pass
+        try:
+            if jira_risks:
+                combined += [r for r in jira_risks if r not in combined]
+        except Exception:
+            pass
+        st.session_state['last_risks'] = combined
+        st.session_state['last_risks_details'] = {'risks': risks, 'summary_risks': summary_risks, 'jira_risks': jira_risks}
+    except Exception:
+        pass
+
+    # Also add synthetic 'events' for risks into last_events so notify/matching picks them up
+    try:
+        if risks:
+            existing = list(st.session_state.get('last_events', []))
+            synthetic = []
+            for i, r in enumerate(risks):
+                if not isinstance(r, dict):
+                    continue
+                ev_id = r.get('key') or r.get('id') or f"risk_{i}"
+                ev_summary = (r.get('summary') or r.get('description') or f"Risk: {r.get('type') or ''}").strip()
+                ev_desc = r.get('description') or r.get('summary') or ''
+                synthetic.append({
+                    'id': ev_id,
+                    'summary': ev_summary,
+                    'description': ev_desc,
+                    'is_risk': True,
+                })
+            # Prepend synthetic risk events so they're found first by fuzzy matching
+            if synthetic:
+                st.session_state['last_events'] = synthetic + existing
+                logger.debug("Persisted %d synthetic risk events into last_events", len(synthetic))
     except Exception:
         pass
 
@@ -577,19 +620,47 @@ def render_risk_result(risk_obj, title: str | None, add_message):
         st.info("No risks detected.")
         return
 
-    # Build display rows
+    # Aggregate counts
+    by_severity = {}
+    by_type = {}
+    for r in risks:
+        if not isinstance(r, dict):
+            continue
+        sev = (r.get('severity') or 'unknown').title()
+        typ = (r.get('type') or 'general').title()
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+        by_type[typ] = by_type.get(typ, 0) + 1
+
+    cols = st.columns(max(1, min(4, len(by_severity) + 1)))
+    i = 0
+    for sev, cnt in sorted(by_severity.items(), key=lambda x: x[0]):
+        cols[i].metric(label=f"{sev} risks", value=str(cnt))
+        i += 1
+
+    # Quick breakdown by type
+    if by_type:
+        with st.expander("Risk types breakdown", expanded=False):
+            for typ, cnt in sorted(by_type.items(), key=lambda x: -x[1]):
+                st.write(f"- **{typ}**: {cnt}")
+
+    # Build table rows for a concise list view
     rows = []
     for r in risks:
         if isinstance(r, dict):
+            key = r.get('key') or r.get('id') or ''
+            summary = (r.get('summary') or r.get('description') or '')
+            summary_short = (summary[:120].rstrip() + '...') if len(summary) > 120 else summary
             rows.append({
-                'ID': r.get('id') or r.get('key') or '',
-                'Type': r.get('type') or r.get('severity') or '',
-                'Summary': r.get('summary') or r.get('description') or '',
+                'Severity': (r.get('severity') or '').title(),
+                'Key': key,
+                'Summary': summary_short,
+                'Type': r.get('type') or '',
                 'Source': r.get('source') or '',
             })
         else:
-            rows.append({'ID': '', 'Type': '', 'Summary': str(r), 'Source': ''})
+            rows.append({'Severity': '', 'Key': '', 'Summary': str(r), 'Type': '', 'Source': ''})
 
+    # Display as dataframe if pandas available, else table
     try:
         import pandas as pd
         df = pd.DataFrame(rows)
@@ -597,12 +668,83 @@ def render_risk_result(risk_obj, title: str | None, add_message):
     except Exception:
         st.table(rows)
 
-    # Provide expanders for full detail per risk
+    # Persist a compact assistant message summarizing the top risks for chat history
+    try:
+        if add_message:
+            total = len(risks)
+            top_lines = []
+            for r in risks:
+                if not isinstance(r, dict):
+                    continue
+                k = r.get('key') or r.get('id') or ''
+                s = (r.get('summary') or r.get('description') or '')
+                s_short = (s.replace('\n', ' ')[:100].rstrip() + '...') if len(s) > 100 else s.replace('\n', ' ')
+                sev = (r.get('severity') or '').title()
+                top_lines.append(f"- {k} — {s_short} ({sev})")
+            md = f"Risks for {title or 'meeting'}: {total} detected.\n\n" + ("\n".join(top_lines) if top_lines else "No detailed risks to list.")
+            try:
+                add_message("assistant", md)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Detail expanders with actions
     for idx, r in enumerate(risks):
-        with st.expander(f"Risk {idx+1}: { (r.get('summary') or r.get('description') or str(r))[:80] }", expanded=False):
+        title_text = (r.get('summary') or r.get('description') or str(r))[:80] if isinstance(r, dict) else str(r)
+        with st.expander(f"Risk {idx+1}: {title_text}"):
             if isinstance(r, dict):
-                for k, v in r.items():
-                    st.markdown(f"**{k}**: {v}")
+                st.markdown(f"**Key:** {r.get('key') or r.get('id') or ''}")
+                st.markdown(f"**Severity:** {r.get('severity')}")
+                st.markdown(f"**Type:** {r.get('type')}")
+                st.markdown(f"**Source:** {r.get('source')}")
+                st.markdown(f"**Summary:** {r.get('summary') or ''}")
+                if r.get('description'):
+                    st.markdown(f"**Description:** {r.get('description')}")
+                # Jira link if key present
+                key = r.get('key')
+                if key and isinstance(key, str) and key.strip():
+                    jira_base = os.environ.get('JIRA_URL') or ''
+                    if jira_base:
+                        jira_link = jira_base.rstrip('/') + f"/browse/{key}"
+                        st.markdown(f"[Open in Jira]({jira_link})")
+                    else:
+                        st.markdown(f"**Key:** {key}")
+
+                # Derived badges (combined flags)
+                badges = []
+                if r.get('severity'):
+                    badges.append(r.get('severity').upper())
+                if r.get('type'):
+                    badges.append(str(r.get('type')))
+                if badges:
+                    st.markdown(f"**Tags:** {' | '.join(badges)}")
+
+                # Quick actions: mark reviewed, copy key (show), suggest assign
+                action_cols = st.columns([1, 1, 2])
+                reviewed_key = f"reviewed_{r.get('key') or r.get('id') or idx}"
+                if reviewed_key not in st.session_state:
+                    st.session_state[reviewed_key] = False
+
+                if action_cols[0].button("Mark Reviewed", key=f"mark_{idx}"):
+                    st.session_state[reviewed_key] = True
+                    st.success("Marked as reviewed")
+                    try:
+                        add_message('assistant', f"Marked risk {r.get('key') or r.get('id')} as reviewed")
+                    except Exception:
+                        pass
+
+                if action_cols[1].button("Show Key", key=f"showkey_{idx}"):
+                    st.info(f"Key: {r.get('key') or r.get('id') or ''}")
+
+                if action_cols[2].button("Suggest Assign", key=f"assign_{idx}"):
+                    # Post a suggest-assign message to chat history that the user can edit/confirm
+                    assignee_sugg = "@owner"
+                    try:
+                        add_message('user', f"Assign {r.get('key') or r.get('id')} to {assignee_sugg}")
+                    except Exception:
+                        pass
+                    st.info("Suggested assign message added to chat history")
             else:
                 st.write(r)
 
@@ -613,7 +755,26 @@ def render_risk_result(risk_obj, title: str | None, add_message):
     if jira_risks:
         with st.expander("Jira-derived risks", expanded=False):
             st.json(jira_risks)
-
+    try:
+        combined = []
+        try:
+            combined = list(risks or [])
+        except Exception:
+            combined = []
+        try:
+            if summary_risks:
+                combined += [r for r in summary_risks if r not in combined]
+        except Exception:
+            pass
+        try:
+            if jira_risks:
+                combined += [r for r in jira_risks if r not in combined]
+        except Exception:
+            pass
+        st.session_state['last_risks'] = combined
+        st.session_state['last_risks_details'] = {'risks': risks, 'summary_risks': summary_risks, 'jira_risks': jira_risks}
+    except Exception:
+        pass
 
 def render_notification_result(notify_obj, title: str | None, add_message):
     """Render notification tool results in a concise, user-friendly way.

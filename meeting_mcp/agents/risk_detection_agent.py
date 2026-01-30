@@ -4,16 +4,26 @@ from ..protocols.a2a import AgentCard, AgentCapability, A2AMessage, PartType
 import os
 import json
 import uuid
+import base64
 from typing import List, Dict, Any
+import logging
+
+try:
+    import requests
+except ImportError:
+    requests = None
 
 try:
     from jira import JIRA
-except Exception:
+except ImportError:
     JIRA = None
+
+logger = logging.getLogger(__name__)
 
 
 class RiskDetectionAgent:
-    # A2A protocol support
+    """Detects risks from meeting summaries and Jira using the updated v3 JQL API."""
+    
     AGENT_CARD = AgentCard(
         agent_id="risk_detection_agent",
         name="RiskDetectionAgent",
@@ -30,251 +40,249 @@ class RiskDetectionAgent:
     @staticmethod
     def handle_detect_risk_message(msg: A2AMessage) -> A2AMessage:
         """Handle A2A detect_risk messages."""
-        # Extract meeting_id, summary, tasks, progress from message parts
-        meeting_id = None
-        summary = None
-        tasks = []
-        progress = None
-        for part in msg.parts:
-            ptype = part.get("type")
-            if ptype in (PartType.MEETING_ID, "meeting_id"):
-                meeting_id = part.get("content")
-            elif ptype in (PartType.SUMMARY, "summary"):
-                summary = part.get("content")
-            elif ptype in (PartType.TASK, PartType.ACTION_ITEM, "task", "action_item"):
-                tasks.append(part.get("content"))
-            elif ptype in (PartType.PROGRESS, "progress"):
-                progress = part.get("content")
-        # Fallbacks
-        if not meeting_id:
-            meeting_id = "unknown"
-        if summary is None:
-            summary = ""
-        if progress is None:
-            progress = {}
-        # Call the agent's detect method
+        meeting_id = next((p.get("content") for p in msg.parts if p.get("type") in (PartType.MEETING_ID, "meeting_id")), "unknown")
+        summary = next((p.get("content") for p in msg.parts if p.get("type") in (PartType.SUMMARY, "summary")), "")
+        tasks = [p.get("content") for p in msg.parts if p.get("type") in (PartType.TASK, PartType.ACTION_ITEM, "task", "action_item")]
+        progress = next((p.get("content") for p in msg.parts if p.get("type") in (PartType.PROGRESS, "progress")), {})
+
         agent = RiskDetectionAgent()
         risks = agent.detect(meeting_id, summary, tasks, progress)
-        return A2AMessage(
-            sender=RiskDetectionAgent.AGENT_CARD.name,
-            recipient=msg.sender,
-            parts=[
-                {
-                    "type": PartType.RESULT,
-                    "content": {"risks": risks}
-                }
-            ]
-        )
-    """Detect simple risks from meeting summary, tasks, and optionally Jira.
-
-    Methods
-    - detect: lightweight heuristic scan of summary/tasks
-    - detect_jira_risks: query Jira for overdue, unassigned, blocked, stale, and high-priority issues
-    """
+        return A2AMessage(message_id=str(uuid.uuid4()), role="agent", parts=[
+            {"type": PartType.RESULT, "content": {"risks": risks}}
+        ])
 
     def __init__(self, mcp_host: object = None):
-        # Initialize Jira client if credentials found
-        self.jira = None
         self.jira_project = os.environ.get("JIRA_PROJECT")
+        self.jira_url = os.environ.get('JIRA_URL')
+        self.jira_user = os.environ.get('JIRA_USER')
+        self.jira_token = os.environ.get('JIRA_TOKEN')
+
         cred_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'credentials.json')
-        try:
-            if os.path.exists(cred_path):
+        if os.path.exists(cred_path):
+            try:
                 with open(cred_path, 'r', encoding='utf-8') as fh:
-                    creds = json.load(fh) or {}
-                    jira_cfg = creds.get('jira', {})
-                    jira_url = os.environ.get('JIRA_URL') or jira_cfg.get('base_url')
-                    jira_user = os.environ.get('JIRA_USER') or jira_cfg.get('user')
-                    jira_token = os.environ.get('JIRA_TOKEN') or jira_cfg.get('token')
-                    self.jira_project = os.environ.get('JIRA_PROJECT') or jira_cfg.get('project') or self.jira_project
-            else:
-                jira_url = os.environ.get('JIRA_URL')
-                jira_user = os.environ.get('JIRA_USER')
-                jira_token = os.environ.get('JIRA_TOKEN')
-        except Exception:
-            jira_url = os.environ.get('JIRA_URL')
-            jira_user = os.environ.get('JIRA_USER')
-            jira_token = os.environ.get('JIRA_TOKEN')
-
-        if JIRA and jira_url and jira_user and jira_token:
-            try:
-                self.jira = JIRA(server=jira_url, basic_auth=(jira_user, jira_token))
+                    creds = json.load(fh).get('jira', {})
+                    self.jira_url = self.jira_url or creds.get('base_url')
+                    self.jira_user = self.jira_user or creds.get('user')
+                    self.jira_token = self.jira_token or creds.get('token')
+                    self.jira_project = self.jira_project or creds.get('project')
             except Exception:
-                self.jira = None
-        # MCP session handling
-        self.mcp_host = mcp_host
-        self.mcp_session_id = None
-        if mcp_host is not None:
+                pass
+
+        self.jira = None
+        if JIRA and self.jira_url and self.jira_user and self.jira_token:
             try:
-                self.mcp_session_id = mcp_host.create_session(self.AGENT_CARD.agent_id)
+                self.jira = JIRA(server=self.jira_url, basic_auth=(self.jira_user, self.jira_token), options={"rest_api_version": "3"})
             except Exception:
-                self.mcp_session_id = None
+                pass
 
-    def _gen_id(self, prefix: str = "risk") -> str:
-        return f"{prefix}_{uuid.uuid4().hex[:8]}"
+    def _search_jql_with_rest(self, jql: str, maxResults: int = 50) -> List[Dict[str, Any]]:
+        """Bypasses deprecated search methods to use the mandatory /search/jql endpoint."""
+        if not (requests and self.jira_url and self.jira_user and self.jira_token):
+            return []
 
-    def detect(self, meeting_id: str, summary: Dict[str, Any], tasks: List[Dict[str, Any]], progress: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Lightweight heuristic detection from summary text and tasks."""
-        risks: List[Dict[str, Any]] = []
-        blockers = []
+        url = f"{self.jira_url.rstrip('/')}/rest/api/3/search/jql"
+        auth_str = base64.b64encode(f"{self.jira_user}:{self.jira_token}".encode('utf-8')).decode('ascii')
+        
+        headers = {
+            'Authorization': f'Basic {auth_str}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        # Request specific fields to ensure 'key' and useful fields are returned.
+        payload = {
+            "jql": jql,
+            "maxResults": maxResults,
+            "fields": ["summary", "assignee", "duedate", "comment", "priority"],
+            "fieldsByKeys": False
+        }
+
         try:
-            if isinstance(summary, dict):
-                blockers = summary.get("blockers", []) or []
-                summary_text = summary.get("summary_text", "") or ""
-            else:
-                summary_text = str(summary)
-        except Exception:
-            summary_text = ""
+            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            r.raise_for_status()
+            return r.json().get('issues', [])
+        except Exception as e:
+            logger.exception("Jira API Error while executing JQL: %s", jql)
+            return []
 
-        st = (summary_text or "").lower()
-
-        # Blockers mentioned explicitly
-        if blockers:
-            for b in blockers:
-                risks.append({
-                    "id": self._gen_id(),
-                    "meeting_id": meeting_id,
-                    "description": str(b),
-                    "severity": "high",
-                    "source": "summary"
-                })
-
-        # Heuristic keyword scan for common risk indicators
-        risk_terms = ["delay", "delayed", "blocked", "blocking", "pending", "cannot", "error", "risk", "concern", "issue"]
-        if any(term in st for term in risk_terms):
-            risks.append({
-                "id": self._gen_id(),
-                "meeting_id": meeting_id,
-                "description": "Detected terms indicating potential delay, blockage or concern.",
-                "severity": "medium",
-                "source": "summary"
-            })
-
-        # Task-based heuristics (jira-level risk)
+    def _get_issue_by_id(self, issue_id_or_key: str) -> Dict[str, Any]:
+        """Fetch a full issue by id or key to obtain `key` and `fields` when JQL returns minimal items."""
+        if not (requests and self.jira_url and self.jira_user and self.jira_token and issue_id_or_key):
+            return {}
+        url = f"{self.jira_url.rstrip('/')}/rest/api/3/issue/{issue_id_or_key}"
+        auth_str = base64.b64encode(f"{self.jira_user}:{self.jira_token}".encode('utf-8')).decode('ascii')
+        headers = {
+            'Authorization': f'Basic {auth_str}',
+            'Accept': 'application/json'
+        }
         try:
-            if isinstance(tasks, list) and len(tasks) > 5:
-                risks.append({
-                    "id": self._gen_id(),
-                    "meeting_id": meeting_id,
-                    "description": "Many tasks created in a single meeting; review capacity and scope.",
-                    "severity": "medium",
-                    "source": "tasks"
-                })
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            return r.json()
         except Exception:
-            pass
+            logger.exception("Failed to fetch issue details for %s", issue_id_or_key)
+            return {}
 
-        # If nothing found, return a low-severity placeholder
-        if not risks:
-            risks.append({
-                "id": self._gen_id(),
-                "meeting_id": meeting_id,
-                "description": "No immediate risks detected.",
-                "severity": "low",
-                "source": "analysis"
-            })
+    def detect(self, meeting_id: str, summary: Any, tasks: List[Any], progress: Any) -> List[Dict[str, Any]]:
+        """Heuristic detection for text-based risks."""
+        risks = []
+        summary_text = summary.get("summary_text", "") if isinstance(summary, dict) else str(summary)
+        
+        # Check for explicit blockers
+        if isinstance(summary, dict) and summary.get("blockers"):
+            for b in summary["blockers"]:
+                risks.append({"id": f"risk_{uuid.uuid4().hex[:6]}", "description": str(b), "severity": "high", "source": "summary"})
 
+        # Heuristic keywords
+        if any(term in summary_text.lower() for term in ["delay", "blocked", "risk", "concern"]):
+            risks.append({"id": f"risk_{uuid.uuid4().hex[:6]}", "description": "Potential risk detected in meeting content.", "severity": "medium", "source": "summary"})
+
+        return risks or [{"id": "none", "description": "No immediate risks detected.", "severity": "low", "source": "analysis"}]
+
+
+    def detect_jira_risks(self, days_stale: int = 7) -> List[Dict[str, Any]]:
+        """Scans Jira and clubs risks by Task ID, keeping the highest severity."""
+        # Mapping to compare severity levels
+        severity_rank = {"high": 3, "medium": 2, "low": 1}
+        grouped_risks = {} # Key: task_id, Value: risk_entry_dict
+
+        if not self.jira_url: return []
+
+        queries = {
+            "unassigned": f'project="{self.jira_project}" AND assignee is EMPTY AND statusCategory != Done',
+            "overdue": f'project="{self.jira_project}" AND duedate <= now() AND statusCategory != Done',
+            "blocked": f'project="{self.jira_project}" AND (flagged = Impediment OR status = Blocked) AND statusCategory != Done',
+            "stale": f'project="{self.jira_project}" AND updated <= "-{days_stale}d" AND statusCategory != Done',
+            "high_priority_open": f'project="{self.jira_project}" AND priority in (Highest, High) AND statusCategory != Done',
+            "missing_estimate": f'project="{self.jira_project}" AND "Story Points" is EMPTY AND issuetype = Story AND statusCategory != Done',
+            "recent_scope_addition": f'project="{self.jira_project}" AND created >= "-24h"'
+        }
+        
+        for r_type, jql in queries.items():
+            issues = self._search_jql_with_rest(jql)
+            for isu in issues:
+                if not isinstance(isu, dict): continue
+                if 'fields' not in isu or 'key' not in isu:
+                    full = self._get_issue_by_id(isu.get('id') or isu.get('key'))
+                    if full: isu = full
+
+                fields = isu.get('fields', {})
+                task_id = isu.get('key')
+                task_summary = fields.get('summary')
+                
+                # Determine severity for this specific risk type
+                current_severity = 'medium'
+                if r_type in ["overdue", "blocked", "high_priority_open"]:
+                    current_severity = 'high'
+                elif r_type == "unassigned" and fields.get('priority') in ['Highest', 'High']:
+                    current_severity = 'high'
+
+                # Clubbing Logic
+                if task_id in grouped_risks:
+                    # 1. Update Severity if current is higher
+                    existing_sev = grouped_risks[task_id]['severity']
+                    if severity_rank[current_severity] > severity_rank[existing_sev]:
+                        grouped_risks[task_id]['severity'] = current_severity
+                    
+                    # 2. Append to description
+                    if r_type not in grouped_risks[task_id]['detected_types']:
+                        grouped_risks[task_id]['description'] += f" | Also flagged as {r_type}."
+                        grouped_risks[task_id]['detected_types'].add(r_type)
+                else:
+                    # New entry for this task
+                    grouped_risks[task_id] = {
+                        'type': r_type, # Primary type
+                        'key': task_id,
+                        'summary': task_summary,
+                        'severity': current_severity,
+                        'source': 'jira',
+                        'description': f"Jira {r_type} risk detected for {task_id}.",
+                        'detected_types': {r_type} # Helper to avoid duplicate descriptions
+                    }
+
+        # Convert dictionary back to list and remove helper field
+        final_risks = []
+        for risk in grouped_risks.values():
+            del risk['detected_types']
+            final_risks.append(risk)
+
+        return final_risks
+    def detect_jira_risks1(self, days_stale: int = 7) -> List[Dict[str, Any]]:
+        """Scans Jira for an expanded set of risk signals including unassigned and high-activity tasks."""
+        risks = []
+        if not self.jira_url: return risks
+
+        # Define specialized JQL queries for risk detection
+        queries = {
+            # 1. Ownership Risk
+            "unassigned": f'project="{self.jira_project}" AND assignee is EMPTY AND statusCategory != Done',
+            
+            # 2. Schedule Risk
+            "overdue": f'project="{self.jira_project}" AND duedate <= now() AND statusCategory != Done',
+            
+            # 3. Dependency Risk
+            "blocked": f'project="{self.jira_project}" AND (flagged = Impediment OR status = Blocked) AND statusCategory != Done',
+            
+            # 4. Momentum Risk
+            "stale": f'project="{self.jira_project}" AND updated <= "-{days_stale}d" AND statusCategory != Done',
+            
+            # 5. Prioritization Risk
+            "high_priority_open": f'project="{self.jira_project}" AND priority in (Highest, High) AND statusCategory != Done',
+            
+            # 6. Planning Risk (Missing estimates for stories)
+            "missing_estimate": f'project="{self.jira_project}" AND "Story Points" is EMPTY AND issuetype = Story AND statusCategory != Done',
+            
+            # 7. Scope Creep (Excessive tasks created recently)
+            "recent_scope_addition": f'project="{self.jira_project}" AND created >= "-24h"'
+        }
+        logger.info("Running Jira risk detection with queries: %s", queries)
+        
+        for r_type, jql in queries.items():
+            issues = self._search_jql_with_rest(jql)
+            print("Jira risk detection query:", jql, "found", len(issues), "issues")
+            print("Jira risk detection query: ", issues)
+            for isu in issues:
+                # If the JQL response contains only minimal objects (e.g. {'id': '10695'}),
+                # fetch the full issue to obtain 'key' and 'fields'.
+                if not isinstance(isu, dict):
+                    continue
+                if 'fields' not in isu or 'key' not in isu:
+                    full = self._get_issue_by_id(isu.get('id') or isu.get('key'))
+                    print("Jira risk detection full : ", full)
+                    if full:
+                        isu = full
+
+                fields = isu.get('fields', {})
+                # 2. Extract specific ID (key) and Summary
+                task_id = isu.get('key')  # e.g., MLPRJCTSCR-10
+                task_summary = fields.get('summary')  # e.g., "Implement Login API"
+               
+                
+                # Check for high communication volume (Sign of confusion or requirement instability)
+                comment_total = fields.get('comment', {}).get('total', 0)
+                
+                risk_entry = {
+                    'type': r_type,                    
+                    'key': task_id,           # Now populating the Task ID
+                    'summary': task_summary,   # Now populating the Summary                    
+                    'severity': 'medium',
+                    'description': f"Jira {r_type} risk detected for {task_id}."
+                }
+
+                # --- Severity Overrides ---
+                if r_type in ["overdue", "blocked", "high_priority_open"]:
+                    risk_entry['severity'] = 'high'
+                
+                if r_type == "unassigned":
+                    risk_entry['description'] = "Task has no owner; high risk of being missed."
+                    risk_entry['severity'] = 'high' if fields.get('priority') in ['Highest', 'High'] else 'medium'
+
+                if comment_total > 10:
+                    risk_entry['description'] += f" | Warning: High discussion volume ({comment_total} comments)."
+                    risk_entry['severity'] = 'high' if risk_entry['severity'] == 'high' else 'medium'
+
+                risks.append(risk_entry)
+        logger.info("Detected Jira risks: %d entries", len(risks))
         return risks
 
-    def detect_jira_risks(self, days_overdue: int = 0, days_stale: int = 7) -> List[Dict[str, Any]]:
-        """Query Jira for common risk signals (overdue, unassigned, blocked, stale, high priority).
-
-        Returns a list of risk dicts. If Jira is not configured, returns an empty list.
-        """
-        risks: List[Dict[str, Any]] = []
-        if not self.jira:
-            return risks
-
-        from datetime import datetime, timedelta
-        now = datetime.utcnow()
-
-        # 1. Overdue tasks
-        try:
-            jql_overdue = f'project={self.jira_project} AND duedate <= now() AND statusCategory != Done'
-            for issue in self.jira.search_issues(jql_overdue):
-                risks.append({
-                    'type': 'overdue',
-                    'key': getattr(issue, 'key', None),
-                    'summary': getattr(issue.fields, 'summary', None),
-                    'due_date': getattr(issue.fields, 'duedate', None),
-                    'description': 'Task is overdue.',
-                    'source': 'jira'
-                })
-        except Exception:
-            pass
-
-        # 2. Unassigned tasks
-        try:
-            jql_unassigned = f'project={self.jira_project} AND assignee is EMPTY AND statusCategory != Done'
-            for issue in self.jira.search_issues(jql_unassigned):
-                risks.append({
-                    'type': 'unassigned',
-                    'key': getattr(issue, 'key', None),
-                    'summary': getattr(issue.fields, 'summary', None),
-                    'description': 'Task is unassigned.',
-                    'source': 'jira'
-                })
-        except Exception:
-            pass
-
-        # 3. Blocked/flagged issues
-        try:
-            jql_blocked = f'project={self.jira_project} AND (flagged = Impediment OR status = Blocked) AND statusCategory != Done'
-            for issue in self.jira.search_issues(jql_blocked):
-                risks.append({
-                    'type': 'blocked',
-                    'key': getattr(issue, 'key', None),
-                    'summary': getattr(issue.fields, 'summary', None),
-                    'description': 'Task is blocked or flagged.',
-                    'source': 'jira'
-                })
-        except Exception:
-            pass
-
-        # 4. No due date
-        try:
-            jql_nodue = f'project={self.jira_project} AND duedate is EMPTY AND statusCategory != Done'
-            for issue in self.jira.search_issues(jql_nodue):
-                risks.append({
-                    'type': 'no_due_date',
-                    'key': getattr(issue, 'key', None),
-                    'summary': getattr(issue.fields, 'summary', None),
-                    'description': 'Task has no due date.',
-                    'source': 'jira'
-                })
-        except Exception:
-            pass
-
-        # 5. Stale tasks (not updated in days_stale)
-        try:
-            stale_date = (now - timedelta(days=days_stale)).strftime('%Y-%m-%d')
-            jql_stale = f'project={self.jira_project} AND updated <= "{stale_date}" AND statusCategory != Done'
-            for issue in self.jira.search_issues(jql_stale):
-                risks.append({
-                    'type': 'stale',
-                    'key': getattr(issue, 'key', None),
-                    'summary': getattr(issue.fields, 'summary', None),
-                    'last_updated': getattr(issue.fields, 'updated', None),
-                    'description': f'Task not updated in {days_stale}+ days.',
-                    'source': 'jira'
-                })
-        except Exception:
-            pass
-
-        # 6. High priority unresolved
-        try:
-            jql_highprio = f'project={self.jira_project} AND priority = Highest AND statusCategory != Done'
-            for issue in self.jira.search_issues(jql_highprio):
-                risks.append({
-                    'type': 'high_priority',
-                    'key': getattr(issue, 'key', None),
-                    'summary': getattr(issue.fields, 'summary', None),
-                    'priority': getattr(issue.fields, 'priority', None),
-                    'description': 'High priority task unresolved.',
-                    'source': 'jira'
-                })
-        except Exception:
-            pass
-
-        return risks
-
-
-__all__ = ["RiskDetectionAgent"]
+__all__ = ["RiskDetectionAgent"]    

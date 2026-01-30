@@ -82,6 +82,7 @@ class OrchestratorAgent:
 
         try:
             for tid in tool_ids:
+                print(f"OrchestratorAgent calling tool {tid} with params: {params}")
                 try:
                     # Pass through params; tools should document expected params for each action
                     res = await self.mcp_host.execute_tool(session_id, tid, params or {})

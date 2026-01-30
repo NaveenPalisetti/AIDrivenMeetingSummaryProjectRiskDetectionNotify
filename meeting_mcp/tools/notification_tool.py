@@ -4,6 +4,7 @@ from typing import Dict, Any
 from meeting_mcp.core.mcp import MCPTool, MCPToolType
 from meeting_mcp.agents.notification_agent import NotificationAgent
 from meeting_mcp.protocols.a2a import A2AMessage, PartType
+import uuid
 
 
 class NotificationTool(MCPTool):
@@ -37,11 +38,7 @@ class NotificationTool(MCPTool):
                 parts.append({"type": PartType.TASK, "content": t})
             for r in risks:
                 parts.append({"type": PartType.RISK, "content": r})
-            msg = A2AMessage(
-                sender="NotificationTool",
-                recipient=NotificationAgent.AGENT_CARD.name,
-                parts=parts
-            )
+            msg = A2AMessage(message_id=str(uuid.uuid4()), role="client", parts=parts)
             # Call the agent handler in a thread pool
             result_msg = await loop.run_in_executor(None, NotificationAgent.handle_notify_message, msg)
             notified = result_msg.parts[0]["content"].get("notified") if result_msg.parts else False

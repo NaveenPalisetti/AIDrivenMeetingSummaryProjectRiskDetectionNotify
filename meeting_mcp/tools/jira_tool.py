@@ -1,6 +1,9 @@
 import asyncio
 import uuid
+import logging
 from typing import Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 from meeting_mcp.core.mcp import MCPTool, MCPToolType
 from meeting_mcp.agents.jira_agent import JiraAgent
@@ -9,6 +12,7 @@ from meeting_mcp.protocols.a2a import A2AMessage, PartType
 
 class JiraTool(MCPTool):
     def __init__(self):
+        print("JiraTool initialized")
         super().__init__(
             tool_id="jira",
             tool_type=MCPToolType.JIRA,
@@ -16,14 +20,28 @@ class JiraTool(MCPTool):
             description="Create Jira issues from action items extracted from meetings.",
             api_endpoint="/mcp/jira",
             auth_required=False,
-            parameters={"action_items": "list[dict]", "user": "str", "date": "str"}
+            parameters={"action_items": "list[dict]", "action_items_list": "list[dict]", "task": "str", "owner": "str", "deadline": "str", "user": "str", "date": "str"}
         )
 
     async def execute(self, params: Dict[str, Any] = None) -> Dict[str, Any]:
+        print("JiraTool.execute called",params)
         params = params or {}
-        action_items: List[Dict[str, Any]] = params.get("action_items") or params.get("action_items_list") or []
+        # Accept multiple aliases for action items and single-task shortcuts
+        action_items: List[Dict[str, Any]] = params.get("action_items") or params.get("action_items_list") or params.get("items") or params.get("tasks") or []
         user = params.get("user")
         date = params.get("date")
+
+        # If caller passed single task via 'task'/'owner'/'deadline', convert to action_items
+        if not action_items and (params.get("task") or params.get("owner") or params.get("deadline") or params.get("due") or params.get("due_date")):
+            single = {
+                "summary": params.get("task") or params.get("title") or params.get("summary"),
+                "owner": params.get("owner") or params.get("assignee") or params.get("user"),
+                "due": params.get("deadline") or params.get("due") or params.get("due_date")
+            }
+            action_items = [single]
+
+        logger.debug("JiraTool.execute called with params keys: %s", list(params.keys()))
+        logger.debug("Resolved action_items count: %d", len(action_items))
         loop = asyncio.get_running_loop()
         try:
             # Build A2A message for Jira agent with a single JSON part
