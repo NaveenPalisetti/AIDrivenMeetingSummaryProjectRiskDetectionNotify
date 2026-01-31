@@ -200,6 +200,12 @@ class SummarizationAgent:
                 logger.debug("Attempting Mistral summarization (digest=%s)", digest)
                 mistral_tokenizer, mistral_model = get_mistral_model()
                 summary_obj = summarize_with_mistral(mistral_tokenizer, mistral_model, full_transcript, "meeting")
+                # Debug: log raw summary_obj structure (truncated) so we can see why parsing failed
+                try:
+                    logger.debug("Raw Mistral summary_obj (truncated): %s", {k: (str(v)[:1000] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>1000 else v) for k,v in (summary_obj or {}).items()})
+                    logger.debug("Mistral summary_text present and length: %s", len(summary_obj.get('summary_text') if isinstance(summary_obj.get('summary_text'), (list, str)) else 0))
+                except Exception:
+                    logger.debug("Failed to log raw Mistral summary_obj structure")
                 summary = summary_obj.get('summary_text', '')
                 action_items = summary_obj.get('action_items', [])
                 download_link = summary_obj.get('download_link', None)

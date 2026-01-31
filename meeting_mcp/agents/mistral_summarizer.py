@@ -5,6 +5,65 @@ import logging
 
 logger = logging.getLogger("meeting_mcp.agents.mistral_summarizer")
 
+
+def extract_last_json(text, chunk_index=None):
+    """Module-level extractor: prefer ```json``` fenced blocks then balanced braces.
+    Returns best-effort JSON string or None. Logs debug points for troubleshooting.
+    """
+    import re
+    if chunk_index is None:
+        ci = "?"
+    else:
+        ci = str(chunk_index)
+    logger.debug("[Mistral][Chunk %s] extract_last_json called (len=%d)", ci, len(text) if text else 0)
+    # 1) Look for ```json``` fenced blocks first — prefer the last one (model may include an example template earlier)
+    matches = list(re.finditer(r"```json\s*(\{.*?\})\s*```", text, flags=re.S))
+    if matches:
+        candidate = matches[-1].group(1)
+        logger.debug("[Mistral][Chunk %s] Found %d ```json``` fenced block(s); using last one.", ci, len(matches))
+    else:
+        # 2) Fall back to finding the last top-level {...} block using brace balancing
+        starts = []
+        ends = []
+        brace_count = 0
+        start = None
+        for i, c in enumerate(text):
+            if c == '{':
+                if brace_count == 0:
+                    start = i
+                brace_count += 1
+            elif c == '}':
+                brace_count -= 1
+                if brace_count == 0 and start is not None:
+                    starts.append(start)
+                    ends.append(i + 1)
+                    start = None
+        if starts and ends:
+            candidate = text[starts[-1]:ends[-1]]
+            logger.debug("[Mistral][Chunk %s] Found last balanced JSON block at %d-%d.", ci, starts[-1], ends[-1])
+        else:
+            logger.debug("[Mistral][Chunk %s] No JSON block found in model output.", ci)
+            return None
+
+    fixed = candidate
+    try:
+        # 3) Minor auto-fixes
+        if fixed.count("'") > fixed.count('"'):
+            fixed = fixed.replace("'", '"')
+            logger.debug("[Mistral][Chunk %s] Replaced single quotes in candidate JSON.", ci)
+        fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+        # Try parsing
+        try:
+            json.loads(fixed)
+            logger.debug("[Mistral][Chunk %s] Candidate JSON parsed successfully.", ci)
+            return fixed
+        except Exception as parse_e:
+            logger.debug("[Mistral][Chunk %s] Candidate JSON failed to parse: %s", ci, parse_e)
+            return fixed
+    except Exception as e:
+        logger.exception("[Mistral][Chunk %s] Error while fixing candidate JSON: %s", ci, e)
+        return fixed
+
 def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting_id):
     logger.info("[Mistral] summarize_with_mistral called. Meeting ID: %s", meeting_id)
     # Accept either a string (single transcript) or a list (pre-chunked)
@@ -93,71 +152,10 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
         )
         mistral_output = mistral_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
         logger.debug("[Mistral][Chunk %d] Model output (first 500 chars):\n%s", idx+1, (mistral_output[:500] + ('...' if len(mistral_output) > 500 else '')))
-        logger.debug("[Mistral][Chunk %d] Full Model output:\n%s", idx+1, mistral_output)
-        def extract_last_json(text):
-            """Extract the most-likely JSON object from model output.
-            Strategy:
-            1) Prefer ```json``` fenced blocks.
-            2) Fall back to the last balanced top-level {...} block.
-            3) Apply minor auto-fixes (single->double quotes, trailing commas) and
-               attempt a JSON parse for validation. Return the best-effort string.
-            """
-            logger.debug("extract_last_json ")
-            import re
-            # 1) Look for a ```json``` fenced block first
-            m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.S)
-            if m:
-                candidate = m.group(1)
-                logger.debug("[Mistral][Chunk %d] Found ```json``` fenced block.", idx+1)
-            else:
-                # 2) Fall back to finding the last top-level {...} block using brace balancing
-                logger.debug("extract_last_json else")
-                starts = []
-                ends = []
-                brace_count = 0
-                start = None
-                for i, c in enumerate(text):
-                    if c == '{':
-                        if brace_count == 0:
-                            start = i
-                        brace_count += 1
-                    elif c == '}':
-                        brace_count -= 1
-                        if brace_count == 0 and start is not None:
-                            starts.append(start)
-                            ends.append(i + 1)
-                            start = None
-                if starts and ends:
-                    candidate = text[starts[-1]:ends[-1]]
-                    logger.debug("[Mistral][Chunk %d] Found last balanced JSON block at %d-%d.", idx+1, starts[-1], ends[-1])
-                else:
-                    logger.debug("[Mistral][Chunk %d] No JSON block found in model output.", idx+1)
-                    return None
-
-            fixed = candidate
-            logger.debug("extract_last_json minor auto-fixes")
-            # 3) Minor auto-fixes: if it looks like single-quoted dicts, convert to double quotes
-            
-            try:
-                if fixed.count("'") > fixed.count('"'):
-                    fixed = fixed.replace("'", '"')
-                    logger.debug("[Mistral][Chunk %d] Replaced single quotes in candidate JSON.", idx+1)
-                # Remove trailing commas before } or ]
-                fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
-                # Validate by attempting to parse
-                try:
-                    json.loads(fixed)
-                    logger.debug("[Mistral][Chunk %d] Candidate JSON parsed successfully.", idx+1)
-                    return fixed
-                except Exception as parse_e:
-                    logger.debug("[Mistral][Chunk %d] Candidate JSON failed to parse: %s", idx+1, parse_e)
-                    # still return best-effort fixed string for inspection
-                    return fixed
-            except Exception as e:
-                logger.exception("[Mistral][Chunk %d] Error while fixing candidate JSON: %s", idx+1, e)
-                return fixed
-
-        json_str = extract_last_json(mistral_output)
+        logger.debug("[Mistral][Chunk %d] Full Model output length=%d", idx+1, len(mistral_output))
+        logger.debug("[Mistral][Chunk %d] Full Model output sample:\n%s", idx+1, (mistral_output[:2000] + ('...' if len(mistral_output) > 2000 else '')))
+        # Use module-level extractor so it can be invoked from notebook for debugging
+        json_str = extract_last_json(mistral_output, chunk_index=idx+1)
         # Always initialize these to avoid UnboundLocalError
         summary_text = []
         action_items = []
@@ -241,6 +239,30 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
         logger.debug("[Mistral][Chunk %d] all_decisions so far: %s", idx+1, all_decisions)
         logger.debug("[Mistral][Chunk %d] all_risks so far: %s", idx+1, all_risks)
         logger.debug("[Mistral][Chunk %d] all_follow_ups so far: %s", idx+1, all_follow_ups)
+
+        # Fallback: if summaries are empty or only placeholders, try extracting plaintext from model output
+        def extract_plaintext_summary(text, max_items=5):
+            try:
+                lines = [l.strip() for l in text.splitlines() if l.strip()]
+                # Prefer explicit bullets/numbered lines
+                bullets = [l for l in lines if re.match(r"^(?:[-*•]|\d+\.)\s+", l)]
+                if bullets:
+                    return [re.sub(r"^(?:[-*•]|\d+\.)\s+", "", b).strip() for b in bullets[:max_items]]
+                # Otherwise split into sentences (simple heuristic)
+                sents = re.split(r'(?<=[.!?])\s+', text)
+                sents = [s.strip() for s in sents if s.strip()]
+                return sents[:max_items]
+            except Exception:
+                return []
+
+        if not filtered_summaries:
+            logger.debug("[Mistral][Chunk %d] No valid summaries after parsing; attempting plaintext fallback.", idx+1)
+            pts = extract_plaintext_summary(mistral_output, max_items=5)
+            if pts:
+                logger.debug("[Mistral][Chunk %d] Plaintext fallback found %d items.", idx+1, len(pts))
+                filtered_summaries = pts
+            else:
+                logger.debug("[Mistral][Chunk %d] Plaintext fallback found no items.", idx+1)
 
     # print(f"[Mistral] FINAL all_summaries: {all_summaries}")
     # print(f"[Mistral] FINAL all_action_items: {all_action_items}")
