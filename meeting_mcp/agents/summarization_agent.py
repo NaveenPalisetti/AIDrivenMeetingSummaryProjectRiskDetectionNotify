@@ -47,25 +47,38 @@ def get_bart_model():
 def get_mistral_model():
     # Attempt to load a local Mistral model when requested by mode.
     # Do not require an environment flag — selection of mode ('mistral') drives loading.
+    logger.debug("Entering get_mistral_model function")
     if not hasattr(get_mistral_model, "tokenizer") or not hasattr(get_mistral_model, "model"):
+        logger.debug("Mistral model or tokenizer not found in cache, loading from disk")
         model_path = mm_config.get_mistral_model_path() or os.environ.get("MISTRAL_MODEL_PATH") or "/content/mistral-7B-Instruct-v0.2"
+        logger.debug("Resolved Mistral model path: %s", model_path)
         if not os.path.exists(model_path):
+            logger.error("Mistral model path does not exist: %s", model_path)
             raise FileNotFoundError(f"Mistral model path not found: {model_path}. Set a valid path via meeting_mcp.config or the MISTRAL_MODEL_PATH env var.")
         logger.info("Loading Mistral model from: %s", model_path)
         from transformers import AutoTokenizer, AutoModelForCausalLM
         from transformers import BitsAndBytesConfig
         import torch
         if not torch.cuda.is_available():
+            logger.error("No CUDA GPU detected. Mistral requires a GPU.")
             raise RuntimeError("No CUDA GPU detected. Mistral requires a GPU. Set MISTRAL_ENABLED=0 to disable.")
+        logger.debug("CUDA GPU detected, proceeding with model loading")
         get_mistral_model.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        logger.debug("Mistral tokenizer loaded successfully")
         try:
             get_mistral_model.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 device_map="cuda",
                 quantization_config=BitsAndBytesConfig(load_in_4bit=True)
             )
-        except Exception:
+            logger.debug("Mistral model loaded with 4-bit quantization")
+        except Exception as e:
+            logger.exception("Failed to load Mistral model with 4-bit quantization, retrying without: %s", e)
             get_mistral_model.model = AutoModelForCausalLM.from_pretrained(model_path, device_map="cuda")
+            logger.debug("Mistral model loaded without 4-bit quantization")
+    else:
+        logger.debug("Mistral model and tokenizer found in cache, reusing existing instances")
+    logger.debug("Exiting get_mistral_model function")
     return get_mistral_model.tokenizer, get_mistral_model.model
 
 

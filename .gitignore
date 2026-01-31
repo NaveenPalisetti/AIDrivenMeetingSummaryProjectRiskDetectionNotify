@@ -138,3 +138,6 @@ Thumbs.db
 
 # Ignore test outputs
 tests/__pycache__/
+ProjectFinal.ipynb
+ProjectFinal_run.ipynb
+ProjectFinal_run - Copy.ipynb

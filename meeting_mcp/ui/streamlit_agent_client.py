@@ -14,16 +14,22 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Enable debug logging to surface backend debug messages (e.g. preprocessor)
-logging.basicConfig(level=logging.DEBUG)
+# Avoid forcing a global DEBUG root level here; let the project's setup_logging
+# control file and console handlers. Configure a module logger and call
+# setup_logging at INFO level to reduce noisy third-party debug logs (e.g. watchdog).
 logger = logging.getLogger("meeting_mcp.ui.streamlit_agent_client")
-# Also attach the project's rotating file logger so Streamlit logs go to Log/meeting_mcp.log
 try:
     from Log.logger import setup_logging
-    setup_logging()
+    log_path = setup_logging(level=logging.INFO)
+    logger.info(f'Logging configured: {log_path}')
+    # Reduce noisy watchdog debug output when running in environments like Colab
+    logging.getLogger('watchdog').setLevel(logging.INFO)
+    logging.getLogger('watchdog.observers').setLevel(logging.INFO)
+    logging.getLogger('watchdog.observers.inotify_buffer').setLevel(logging.INFO)
 except Exception as _e:
-    # If file logging fails, continue with console logging only
-    logger.debug("setup_logging() failed in streamlit UI: %s", _e)
+    # Fallback: ensure console logging at INFO so Streamlit output appears
+    logging.basicConfig(level=logging.INFO)
+    logger.info("setup_logging() failed in streamlit UI: %s", _e)
 
 from meeting_mcp.system import create_system
 from meeting_mcp.ui.renderers import (
