@@ -20,6 +20,19 @@ from meeting_mcp import config as mm_config
 logger = logging.getLogger("meeting_mcp.summarization")
 
 
+def model_is_4bit(model) -> bool:
+    """Heuristic check whether the loaded model uses bitsandbytes 4-bit modules."""
+    try:
+        for m in model.modules():
+            name = m.__class__.__name__.lower()
+            mod = getattr(m.__class__, "__module__", "").lower()
+            if "linear4bit" in name or "bnb" in mod or "bitsandbytes" in mod:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def get_bart_model():
     if not hasattr(get_bart_model, "tokenizer") or not hasattr(get_bart_model, "model"):
         # Resolve BART model path via centralized helper in meeting_mcp.config
@@ -76,6 +89,12 @@ def get_mistral_model():
             logger.exception("Failed to load Mistral model with 4-bit quantization, retrying without: %s", e)
             get_mistral_model.model = AutoModelForCausalLM.from_pretrained(model_path, device_map="cuda")
             logger.debug("Mistral model loaded without 4-bit quantization")
+        # Log whether model appears to have 4-bit bitsandbytes modules
+        try:
+            is4 = model_is_4bit(get_mistral_model.model)
+            logger.info("Model 4-bit present: %s", is4)
+        except Exception:
+            logger.debug("Could not determine if model is 4-bit")
     else:
         logger.debug("Mistral model and tokenizer found in cache, reusing existing instances")
     logger.debug("Exiting get_mistral_model function")
