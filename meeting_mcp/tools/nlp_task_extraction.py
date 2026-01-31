@@ -229,4 +229,5 @@ if __name__ == "__main__":
     logger.info("Running extractor on input (len=%d)", len(text))
     tasks = extract_tasks_structured(text, max_tasks=20, min_confidence=0.4)
     import json
+    logging.getLogger(__name__).debug(json.dumps(tasks, indent=2))
     print(json.dumps(tasks, indent=2))

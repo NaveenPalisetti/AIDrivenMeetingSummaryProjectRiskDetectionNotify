@@ -256,6 +256,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
             greeting_re = r"^\s*(hi|hello|hey|good morning|good afternoon|good evening|how are you|how can you help|what can you do)\b"
             if re.search(greeting_re, lower):
                 print("Greeting detected in prompt")
+                logger.debug("Greeting detected in prompt")
                 canned = (
                     "AI Orchestrator Help:\n\n"
                     "Calendar / Fetch:\n"
@@ -410,6 +411,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
         # Detect risk command: mirror summarize flow but call orchestrator with risk intent        
         if ("detect risk" in lower or "risk" in lower) and st.session_state.get("last_events"):
             print("Risk detection command detected in chat")
+            logger.debug("Risk detection command detected in chat")
             title = None
             mq = re.search(r'["\u201c\u201d](?P<tq>[^"\u201c\u201d]+)["\u201c\u201d]', prompt)
             if mq:
@@ -486,6 +488,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     matched = None
 
             print("Risk detection matched event: ", matched)
+            logger.debug("Risk detection matched event: %s", matched)
             if matched:
                 meeting_title = matched.get('summary') or matched.get('id')
                 # Build params similar to event-based detect
@@ -564,6 +567,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                     logger.debug("Orchestrator jira call: task=%s", (task or '')[:200])
                     logger.debug("Jira params: %s", {k: (str(v)[:200] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>200 else v) for k,v in params.items()})
                     print("Jira params: %s" % {k: (str(v)[:200] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>200 else v) for k,v in params.items()})
+                    logger.debug("Jira params: %s", {k: (str(v)[:200] + '...' if isinstance(v, (str, list, dict)) and len(str(v))>200 else v) for k,v in params.items()})
                     try:
                         jira_result = asyncio.run(orchestrator.orchestrate(f"create jira for {task}", params, session_id=st.session_state.get("mcp_session_id")))
                         logger.debug("Jira result: %s", str(jira_result)[:1000])
@@ -589,6 +593,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
         # Notify command: allow user to type "notify <meeting>" or "send notification for <meeting>"
         if ("notify" in lower or "send notification" in lower or "notify team" in lower) and st.session_state.get('last_events'):
             print("Notify command detected in chat",st.session_state.get('last_events'))
+            logger.debug("Notify command detected in chat: %s", st.session_state.get('last_events'))
             try:
                 import re
                 title = None
@@ -655,6 +660,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                         matched = None
 
                 print("Notify matched event: ", matched)
+                logger.debug("Notify matched event: %s", matched)
                 if matched:
                     meeting_title = matched.get('summary') or matched.get('id')
                     params = {"meeting_id": meeting_title, "summary": {"summary_text": matched.get('description') or matched.get('summary')}}
@@ -664,6 +670,7 @@ if prompt := st.chat_input("Describe your request (press Enter to send)"):
                         params['risks'] = st.session_state.get('last_risks')
 
                     print("Notify matched event: ", matched)
+                    logger.debug("Notify matched event: %s", matched)
                     try:
                         logger.debug("Orchestrator notify call: %s", params)
                         notify_result = asyncio.run(orchestrator.orchestrate(f"notify for {meeting_title}", params, session_id=st.session_state.get("mcp_session_id")))

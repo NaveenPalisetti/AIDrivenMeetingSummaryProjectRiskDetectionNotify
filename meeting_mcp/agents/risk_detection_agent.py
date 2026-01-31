@@ -240,7 +240,9 @@ class RiskDetectionAgent:
         for r_type, jql in queries.items():
             issues = self._search_jql_with_rest(jql)
             print("Jira risk detection query:", jql, "found", len(issues), "issues")
+            logger.debug("Jira risk detection query: %s found %d issues", jql, len(issues))
             print("Jira risk detection query: ", issues)
+            logger.debug("Jira risk detection issues: %s", issues)
             for isu in issues:
                 # If the JQL response contains only minimal objects (e.g. {'id': '10695'}),
                 # fetch the full issue to obtain 'key' and 'fields'.
@@ -249,6 +251,7 @@ class RiskDetectionAgent:
                 if 'fields' not in isu or 'key' not in isu:
                     full = self._get_issue_by_id(isu.get('id') or isu.get('key'))
                     print("Jira risk detection full : ", full)
+                    logger.debug("Jira risk detection full issue fetched: %s", full)
                     if full:
                         isu = full
 

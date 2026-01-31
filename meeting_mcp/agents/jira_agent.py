@@ -15,6 +15,7 @@ except Exception:
 
 class JiraAgent:
     print("JiraAgent loaded")
+    logger.debug("JiraAgent loaded")
     AGENT_CARD = AgentCard(
         agent_id="jira_agent",
         name="JiraAgent",
@@ -40,6 +41,7 @@ class JiraAgent:
     @staticmethod
     def handle_create_jira_message(msg: A2AMessage) -> A2AMessage:
         print("JiraAgent loaded handle_create_jira_message ",msg)
+        logger.debug("JiraAgent loaded handle_create_jira_message %s", msg)
         """Handle A2A create_jira messages."""
         # Extract action items from JSON parts (align with calendar agent pattern)
         action_items = None
@@ -128,6 +130,7 @@ class JiraAgent:
         # Load credentials from meeting_mcp/config/credentials.json if present
 
         print("JiraAgent.create_jira_issues called with action_items:", action_items)
+        logger.debug("JiraAgent.create_jira_issues called with action_items: %s", action_items)
         cred_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config", "credentials.json"))
         creds = {}
         try:

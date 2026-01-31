@@ -13,6 +13,7 @@ from meeting_mcp.protocols.a2a import A2AMessage, PartType
 class JiraTool(MCPTool):
     def __init__(self):
         print("JiraTool initialized")
+        logger.debug("JiraTool initialized")
         super().__init__(
             tool_id="jira",
             tool_type=MCPToolType.JIRA,
@@ -25,6 +26,7 @@ class JiraTool(MCPTool):
 
     async def execute(self, params: Dict[str, Any] = None) -> Dict[str, Any]:
         print("JiraTool.execute called",params)
+        logger.debug("JiraTool.execute called %s", params)
         params = params or {}
         # Accept multiple aliases for action items and single-task shortcuts
         action_items: List[Dict[str, Any]] = params.get("action_items") or params.get("action_items_list") or params.get("items") or params.get("tasks") or []

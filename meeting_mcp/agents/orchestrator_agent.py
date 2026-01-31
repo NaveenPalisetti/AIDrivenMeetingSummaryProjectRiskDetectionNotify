@@ -83,6 +83,7 @@ class OrchestratorAgent:
         try:
             for tid in tool_ids:
                 print(f"OrchestratorAgent calling tool {tid} with params: {params}")
+                logger.debug("OrchestratorAgent calling tool %s with params: %s", tid, params)
                 try:
                     # Pass through params; tools should document expected params for each action
                     res = await self.mcp_host.execute_tool(session_id, tid, params or {})
@@ -109,5 +110,6 @@ if __name__ == "__main__":
     async def demo():
         res = await orch.orchestrate("Please fetch my calendar events for next week", params={"action": "fetch", "start": None, "end": None})
         print(json.dumps(res, indent=2))
+        logger.debug(json.dumps(res, indent=2))
 
     asyncio.run(demo())

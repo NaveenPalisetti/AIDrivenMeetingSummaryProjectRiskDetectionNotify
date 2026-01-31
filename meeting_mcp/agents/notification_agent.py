@@ -3,10 +3,13 @@ import os
 import json
 import uuid
 from datetime import datetime
+import logging
 try:
     import requests
 except Exception:
     requests = None
+
+logger = logging.getLogger(__name__)
 
 
 def _load_creds():
@@ -56,22 +59,29 @@ class NotificationAgent:
             'timestamp': datetime.utcnow().isoformat() + 'Z'
         }
         print('=== Notification ===')
+        logger.debug('=== Notification ===')
         print(json.dumps(payload, indent=2))
+        logger.debug(json.dumps(payload, indent=2))
         print('====================', self.slack_webhook)
+        logger.debug('==================== %s', self.slack_webhook)
         if self.slack_webhook and requests:
             print('Sending Slack notification...')
+            logger.debug('Sending Slack notification...')
             try:
                 # Send a human-friendly text plus the full payload as a JSON code block
                 text = f"Meeting {meeting_id} summary: {payload['summary']}\n\nFull payload:\n```json\n{json.dumps(payload, indent=2)}\n```"
                 # Post as JSON; Slack will render the code block for readability
                 print('Posting to Slack text:', text)
+                logger.debug('Posting to Slack text: %s', text)
                 r = requests.post(self.slack_webhook, json={"text": text}, timeout=15)
                 try:
                     print('Slack response:', r.status_code, r.text)
+                    logger.debug('Slack response: %s %s', r.status_code, r.text)
                 except Exception:
                     pass
             except Exception as e:
                 print('Slack notify failed:', e)
+                logger.debug('Slack notify failed: %s', e)
         return True
 
     @staticmethod
