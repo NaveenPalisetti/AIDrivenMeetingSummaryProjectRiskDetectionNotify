@@ -1,15 +1,18 @@
 import re
 import json
 import torch
+import logging
+
+logger = logging.getLogger("meeting_mcp.agents.mistral_summarizer")
 
 def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting_id):
-    print("[Mistral] summarize_with_mistral called. Meeting ID:", meeting_id)
+    logger.info("[Mistral] summarize_with_mistral called. Meeting ID: %s", meeting_id)
     # Accept either a string (single transcript) or a list (pre-chunked)
     if isinstance(transcript, list):
         transcript_chunks = [t for t in transcript if t and isinstance(t, str) and len(t.split()) >= 10]
-        print(f"[Mistral] Received transcript as list. {len(transcript_chunks)} valid chunks.")
+        logger.debug("[Mistral] Received transcript as list. %d valid chunks.", len(transcript_chunks))
         if not transcript_chunks:
-            print("[Mistral] No valid transcript chunks for summarization.")
+            logger.warning("[Mistral] No valid transcript chunks for summarization.")
             return {
                 'meeting_id': meeting_id,
                 'summary_text': "Transcript too short for summarization.",
@@ -17,7 +20,7 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
             }
     else:
         if not transcript or not isinstance(transcript, str) or len(transcript.split()) < 10:
-            print("[Mistral] Transcript too short for summarization.")
+            logger.warning("[Mistral] Transcript too short for summarization.")
             return {
                 'meeting_id': meeting_id,
                 'summary_text': "Transcript too short for summarization.",
@@ -31,13 +34,13 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
                 chunks.append(chunk)
             return chunks
         transcript_chunks = chunk_text(transcript, max_words=1500)
-        print(f"[Mistral] Transcript split into {len(transcript_chunks)} chunk(s) (chunk size: 1500 words).")
+        logger.debug("[Mistral] Transcript split into %d chunk(s) (chunk size: 1500 words).", len(transcript_chunks))
 
     all_summaries = []
     all_action_items = []
 
     for idx, chunk in enumerate(transcript_chunks):
-        print(f"[Mistral][Chunk {idx+1}] Processing chunk of length {len(chunk.split())} words.")
+        logger.debug("[Mistral][Chunk %d] Processing chunk of length %d words.", idx+1, len(chunk.split()))
         mistral_prompt = (
             "You are an AI specialized in analyzing meeting transcripts.\n"
             "Your task is to produce:\n"
@@ -69,7 +72,7 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
         )
         # print(f"[Mistral][Chunk {idx+1}] Prompt sent to model (first 500 chars):\n", mistral_prompt[:500], "..." if len(mistral_prompt) > 500 else "")
         device = next(mistral_model.parameters()).device
-        print(f"[Mistral][Chunk {idx+1}] Using device: {device}")
+        logger.debug("[Mistral][Chunk %d] Using device: %s", idx+1, device)
         encoded = mistral_tokenizer.encode_plus(
             mistral_prompt,
             truncation=True,
@@ -78,7 +81,7 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
         )
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device)
-        print(f"[Mistral][Chunk {idx+1}] Input IDs shape: {input_ids.shape}")
+        logger.debug("[Mistral][Chunk %d] Input IDs shape: %s", idx+1, input_ids.shape)
         summary_ids = mistral_model.generate(
             input_ids,
             attention_mask=attention_mask,
@@ -89,39 +92,70 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
             pad_token_id=mistral_tokenizer.eos_token_id
         )
         mistral_output = mistral_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-        print(f"[Mistral][Chunk {idx+1}] Model output (first 500 chars):\n{mistral_output[:500]}{'...' if len(mistral_output) > 500 else ''}")
-        print(f"[Mistral][Chunk {idx+1}] Full Model output:\n{mistral_output}")
+        logger.debug("[Mistral][Chunk %d] Model output (first 500 chars):\n%s", idx+1, (mistral_output[:500] + ('...' if len(mistral_output) > 500 else '')))
+        logger.debug("[Mistral][Chunk %d] Full Model output:\n%s", idx+1, mistral_output)
         def extract_last_json(text):
-            # Find all top-level JSON objects and return the last one
-            starts = []
-            ends = []
-            brace_count = 0
-            start = None
-            for i, c in enumerate(text):
-                if c == '{':
-                    if brace_count == 0:
-                        start = i
-                    brace_count += 1
-                elif c == '}':
-                    brace_count -= 1
-                    if brace_count == 0 and start is not None:
-                        starts.append(start)
-                        ends.append(i+1)
-                        start = None
-            if starts and ends:
-                # Return the last JSON block
-                candidate = text[starts[-1]:ends[-1]]
-                # Auto-fix: replace single quotes with double quotes, remove trailing commas
-                import re
-                fixed = candidate
-                # Only replace single quotes if it looks like JSON (avoid breaking valid JSON)
+            """Extract the most-likely JSON object from model output.
+            Strategy:
+            1) Prefer ```json``` fenced blocks.
+            2) Fall back to the last balanced top-level {...} block.
+            3) Apply minor auto-fixes (single->double quotes, trailing commas) and
+               attempt a JSON parse for validation. Return the best-effort string.
+            """
+            logger.debug("extract_last_json ")
+            import re
+            # 1) Look for a ```json``` fenced block first
+            m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.S)
+            if m:
+                candidate = m.group(1)
+                logger.debug("[Mistral][Chunk %d] Found ```json``` fenced block.", idx+1)
+            else:
+                # 2) Fall back to finding the last top-level {...} block using brace balancing
+                logger.debug("extract_last_json else")
+                starts = []
+                ends = []
+                brace_count = 0
+                start = None
+                for i, c in enumerate(text):
+                    if c == '{':
+                        if brace_count == 0:
+                            start = i
+                        brace_count += 1
+                    elif c == '}':
+                        brace_count -= 1
+                        if brace_count == 0 and start is not None:
+                            starts.append(start)
+                            ends.append(i + 1)
+                            start = None
+                if starts and ends:
+                    candidate = text[starts[-1]:ends[-1]]
+                    logger.debug("[Mistral][Chunk %d] Found last balanced JSON block at %d-%d.", idx+1, starts[-1], ends[-1])
+                else:
+                    logger.debug("[Mistral][Chunk %d] No JSON block found in model output.", idx+1)
+                    return None
+
+            fixed = candidate
+            logger.debug("extract_last_json minor auto-fixes")
+            # 3) Minor auto-fixes: if it looks like single-quoted dicts, convert to double quotes
+            
+            try:
                 if fixed.count("'") > fixed.count('"'):
                     fixed = fixed.replace("'", '"')
+                    logger.debug("[Mistral][Chunk %d] Replaced single quotes in candidate JSON.", idx+1)
                 # Remove trailing commas before } or ]
-                fixed = re.sub(r',([ \t\r\n]*[}\]])', r'\1', fixed)
-                print(f"[Mistral][Chunk {idx+1}] Candidate JSON before parsing:\n{fixed}")
+                fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+                # Validate by attempting to parse
+                try:
+                    json.loads(fixed)
+                    logger.debug("[Mistral][Chunk %d] Candidate JSON parsed successfully.", idx+1)
+                    return fixed
+                except Exception as parse_e:
+                    logger.debug("[Mistral][Chunk %d] Candidate JSON failed to parse: %s", idx+1, parse_e)
+                    # still return best-effort fixed string for inspection
+                    return fixed
+            except Exception as e:
+                logger.exception("[Mistral][Chunk %d] Error while fixing candidate JSON: %s", idx+1, e)
                 return fixed
-            return None
 
         json_str = extract_last_json(mistral_output)
         # Always initialize these to avoid UnboundLocalError
@@ -130,8 +164,9 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
         decisions = []
         risks = []
         follow_up_questions = []
+        logger.debug("[Mistral][Chunk %d] Extracted JSON string: %s", idx+1, json_str)
         if json_str:
-            print(f"[Mistral][Chunk {idx+1}] JSON block found in output.")
+            logger.debug("[Mistral][Chunk %d] JSON block found in output.", idx+1)
             try:
                 parsed = json.loads(json_str)
                 summary_text = parsed.get('summary', [])
@@ -140,15 +175,15 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
                 decisions = parsed.get('decisions', [])
                 risks = parsed.get('risks', [])
                 follow_up_questions = parsed.get('follow_up_questions', [])
-                print(f"[Mistral][Chunk {idx+1}] Parsed summary: {summary_text}")
-                print(f"[Mistral][Chunk {idx+1}] Parsed action_items: {action_items}")
-                print(f"[Mistral][Chunk {idx+1}] Parsed decisions: {decisions}")
-                print(f"[Mistral][Chunk {idx+1}] Parsed risks: {risks}")
-                print(f"[Mistral][Chunk {idx+1}] Parsed follow_up_questions: {follow_up_questions}")
+                logger.debug("[Mistral][Chunk %d] Parsed summary: %s", idx+1, summary_text)
+                logger.debug("[Mistral][Chunk %d] Parsed action_items: %s", idx+1, action_items)
+                logger.debug("[Mistral][Chunk %d] Parsed decisions: %s", idx+1, decisions)
+                logger.debug("[Mistral][Chunk %d] Parsed risks: %s", idx+1, risks)
+                logger.debug("[Mistral][Chunk %d] Parsed follow_up_questions: %s", idx+1, follow_up_questions)
             except Exception as e:
-                print(f"[Mistral][Chunk {idx+1}] JSON parsing error: {e}")
+                logger.exception("[Mistral][Chunk %d] JSON parsing error: %s", idx+1, e)
         else:
-            print(f"[Mistral][Chunk {idx+1}] No JSON block found in output.")
+            logger.debug("[Mistral][Chunk %d] No JSON block found in output.", idx+1)
             summary_text = []
             action_items = []
         # Clean up and filter out empty/placeholder/point items
@@ -178,16 +213,18 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
                     return False
                 return True
             return False
+        logger.debug("[Mistral][Chunk %d] Validating and filtering extracted items.", idx+1)
+        logger.debug("[Mistral][Chunk %d] Validating and filtering extracted items.summary_text: %s", idx+1, summary_text)
         filtered_summaries = [s for s in (summary_text if isinstance(summary_text, list) else [summary_text]) if is_valid_summary_item(s)]
         filtered_action_items = [a for a in (action_items if isinstance(action_items, list) else [action_items]) if is_valid_action_item(a)]
         filtered_decisions = [d for d in (decisions if isinstance(decisions, list) else [decisions]) if is_valid_summary_item(d)]
-        filtered_risks = [r for r in (risks if isinstance(r, list) else [risks]) if is_valid_summary_item(r)]
+        filtered_risks = [r for r in (risks if isinstance(risks, list) else [risks]) if is_valid_summary_item(r)]
         filtered_follow_ups = [f for f in (follow_up_questions if isinstance(follow_up_questions, list) else [follow_up_questions]) if is_valid_summary_item(f)]
-        print(f"[Mistral][Chunk {idx+1}] Filtered summary: {filtered_summaries}")
-        print(f"[Mistral][Chunk {idx+1}] Filtered action_items: {filtered_action_items}")
-        print(f"[Mistral][Chunk {idx+1}] Filtered decisions: {filtered_decisions}")
-        print(f"[Mistral][Chunk {idx+1}] Filtered risks: {filtered_risks}")
-        print(f"[Mistral][Chunk {idx+1}] Filtered follow_up_questions: {filtered_follow_ups}")
+        logger.debug("[Mistral][Chunk %d] Filtered summary: %s", idx+1, filtered_summaries)
+        logger.debug("[Mistral][Chunk %d] Filtered action_items: %s", idx+1, filtered_action_items)
+        logger.debug("[Mistral][Chunk %d] Filtered decisions: %s", idx+1, filtered_decisions)
+        logger.debug("[Mistral][Chunk %d] Filtered risks: %s", idx+1, filtered_risks)
+        logger.debug("[Mistral][Chunk %d] Filtered follow_up_questions: %s", idx+1, filtered_follow_ups)
         all_summaries.extend(filtered_summaries)
         all_action_items.extend(filtered_action_items)
         if 'all_decisions' not in locals():
@@ -199,11 +236,11 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
         all_decisions.extend(filtered_decisions)
         all_risks.extend(filtered_risks)
         all_follow_ups.extend(filtered_follow_ups)
-        print(f"[Mistral][Chunk {idx+1}] all_summaries so far: {all_summaries}")
-        print(f"[Mistral][Chunk {idx+1}] all_action_items so far: {all_action_items}")
-        print(f"[Mistral][Chunk {idx+1}] all_decisions so far: {all_decisions}")
-        print(f"[Mistral][Chunk {idx+1}] all_risks so far: {all_risks}")
-        print(f"[Mistral][Chunk {idx+1}] all_follow_ups so far: {all_follow_ups}")
+        logger.debug("[Mistral][Chunk %d] all_summaries so far: %s", idx+1, all_summaries)
+        logger.debug("[Mistral][Chunk %d] all_action_items so far: %s", idx+1, all_action_items)
+        logger.debug("[Mistral][Chunk %d] all_decisions so far: %s", idx+1, all_decisions)
+        logger.debug("[Mistral][Chunk %d] all_risks so far: %s", idx+1, all_risks)
+        logger.debug("[Mistral][Chunk %d] all_follow_ups so far: %s", idx+1, all_follow_ups)
 
     # print(f"[Mistral] FINAL all_summaries: {all_summaries}")
     # print(f"[Mistral] FINAL all_action_items: {all_action_items}")
@@ -217,18 +254,18 @@ def summarize_with_mistral(mistral_tokenizer, mistral_model, transcript, meeting
                 seen.add(key)
                 deduped.append(item)
         return deduped
-    print(f"[Mistral] Deduplicating final results...",all_summaries)
+    logger.debug("[Mistral] Deduplicating final results... %s", all_summaries)
     deduped_summaries = dedup_list(all_summaries)
-    print(f"[Mistral] Deduplicating final deduped_summaries ...",deduped_summaries)
+    logger.debug("[Mistral] Deduplicating final deduped_summaries ... %s", deduped_summaries)
     deduped_action_items = dedup_list(all_action_items)
     deduped_decisions = dedup_list(all_decisions) if 'all_decisions' in locals() else []
     deduped_risks = dedup_list(all_risks) if 'all_risks' in locals() else []
     deduped_follow_ups = dedup_list(all_follow_ups) if 'all_follow_ups' in locals() else []
-    print(f"[Mistral] FINAL deduped_summaries: {deduped_summaries}")
-    print(f"[Mistral] FINAL deduped_action_items: {deduped_action_items}")
-    print(f"[Mistral] FINAL deduped_decisions: {deduped_decisions}")
-    print(f"[Mistral] FINAL deduped_risks: {deduped_risks}")
-    print(f"[Mistral] FINAL deduped_follow_ups: {deduped_follow_ups}")
+    logger.debug("[Mistral] FINAL deduped_summaries: %s", deduped_summaries)
+    logger.debug("[Mistral] FINAL deduped_action_items: %s", deduped_action_items)
+    logger.debug("[Mistral] FINAL deduped_decisions: %s", deduped_decisions)
+    logger.debug("[Mistral] FINAL deduped_risks: %s", deduped_risks)
+    logger.debug("[Mistral] FINAL deduped_follow_ups: %s", deduped_follow_ups)
     return {
         'meeting_id': meeting_id,
         'summary_text': deduped_summaries,
